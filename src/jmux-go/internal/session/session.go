@@ -59,16 +59,18 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		sessionName = fmt.Sprintf("session-%d", time.Now().Unix())
 	}
 
-	// Get session name - use provided name or current session
+	// Use provided session name for registration, but get actual tmux session name for reference
 	tmuxSessionName := sessionName
+	actualTmuxSession := ""
+	
 	if m.isInTmuxSession() {
-		// Get current session name if we're already in tmux
+		// Get current tmux session name for reference, but keep user-provided name for sharing
 		cmd := exec.Command("tmux", "display-message", "-p", "#S")
 		output, err := cmd.Output()
 		if err == nil {
-			tmuxSessionName = strings.TrimSpace(string(output))
+			actualTmuxSession = strings.TrimSpace(string(output))
 		}
-		color.Blue("📋 Sharing current tmux session: %s", tmuxSessionName)
+		color.Blue("📋 Sharing current tmux session (%s) as '%s'", actualTmuxSession, tmuxSessionName)
 	} else {
 		color.Blue("🔄 Starting tmux session '%s'...", tmuxSessionName)
 	}
@@ -86,6 +88,11 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 
 	if err := m.registerSession(session); err != nil {
 		return err
+	}
+
+	// Update port_sessions.db
+	if err := m.updatePortMapping(session); err != nil {
+		color.Yellow("Warning: Failed to update port mapping: %v", err)
 	}
 
 	// Send invitations
@@ -113,12 +120,17 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		return fmt.Errorf("failed to get current executable path: %v", err)
 	}
 	
+	// Get the directory containing the jmux-go binary
+	jmuxDir := filepath.Dir(jmuxBinary)
+	
 	wrapperScript := fmt.Sprintf(`#!/bin/bash
+# Add jmux-go binary directory to PATH
+export PATH="%s:$PATH"
 # Start jcat server in background
 %s _internal_jcat_server %d %s &
 # Start a shell
 exec $SHELL
-`, jmuxBinary, port, m.config.SetSizeScript)
+`, jmuxDir, jmuxBinary, port, m.config.SetSizeScript)
 
 	// Write wrapper script to temp file
 	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("jmux-wrapper-%d.sh", time.Now().UnixNano()))
@@ -126,11 +138,6 @@ exec $SHELL
 		return fmt.Errorf("failed to create wrapper script: %v", err)
 	}
 	defer os.Remove(wrapperPath) // Clean up on exit
-
-	color.Green("✓ Session '%s' shared on port %d", tmuxSessionName, port)
-	if len(inviteUsers) > 0 {
-		color.Cyan("📧 Invitations sent to: %s", strings.Join(inviteUsers, ", "))
-	}
 
 	// Start tmux with wrapper script (like bash version)
 	color.Blue("🔗 Starting shared tmux session...")
@@ -295,7 +302,11 @@ ALLOWED_USERS=%s
 func (m *Manager) findUserSession(user, sessionName string) (*Session, error) {
 	sessions, err := m.ListUserSessions(user)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list sessions for user %s: %v", user, err)
+	}
+
+	if len(sessions) == 0 {
+		return nil, fmt.Errorf("no sessions found for user %s", user)
 	}
 
 	for _, session := range sessions {
@@ -304,7 +315,17 @@ func (m *Manager) findUserSession(user, sessionName string) (*Session, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("session not found")
+	// List available sessions for better error message
+	var availableSessions []string
+	for _, session := range sessions {
+		availableSessions = append(availableSessions, session.Name)
+	}
+
+	if sessionName == "" {
+		return nil, fmt.Errorf("no default session found for user %s. Available sessions: %v", user, availableSessions)
+	} else {
+		return nil, fmt.Errorf("session '%s' not found for user %s. Available sessions: %v", sessionName, user, availableSessions)
+	}
 }
 
 func (m *Manager) ListUserSessions(user string) ([]*Session, error) {
@@ -392,14 +413,14 @@ func (m *Manager) readSessionFile(filePath string) (*Session, error) {
 }
 
 func (m *Manager) stopSession(session *Session) {
-	color.Yellow("Stopping session '%s'...", session.Name)
+	color.Yellow("Stopping sharing for session '%s'...", session.Name)
 
-	// Kill the process if it's still running
-	if session.PID > 0 {
-		process, err := os.FindProcess(session.PID)
-		if err == nil {
-			process.Kill()
-		}
+	// Find and kill only the jcat server process, not the tmux session
+	cmd := exec.Command("pkill", "-f", fmt.Sprintf("_internal_jcat_server %d", session.Port))
+	if err := cmd.Run(); err != nil {
+		// Try alternative method using lsof and port
+		cmd = exec.Command("sh", "-c", fmt.Sprintf("lsof -ti:%d | xargs -r kill", session.Port))
+		cmd.Run() // Ignore errors - process might already be dead
 	}
 
 	// Remove session file
@@ -407,7 +428,12 @@ func (m *Manager) stopSession(session *Session) {
 	filePath := filepath.Join(m.config.SessionsDir, fileName)
 	os.Remove(filePath)
 
-	color.Green("✓ Session '%s' stopped", session.Name)
+	// Remove from port_sessions.db
+	if err := m.removePortMapping(session.Port); err != nil {
+		color.Yellow("Warning: Failed to update port mapping: %v", err)
+	}
+
+	color.Green("✓ Sharing stopped for session '%s' (tmux session remains active)", session.Name)
 }
 
 func (m *Manager) isUserAllowed(user string, allowedUsers []string) bool {
@@ -442,4 +468,84 @@ func (m *Manager) resolveHostIP(hostUser string) (string, error) {
 
 func (m *Manager) isInTmuxSession() bool {
 	return os.Getenv("TMUX") != ""
+}
+
+// updatePortMapping adds/updates entry in port_sessions.db
+func (m *Manager) updatePortMapping(session *Session) error {
+	// Read existing entries
+	portMappings, err := m.readPortMappings()
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Add/update the entry for this session
+	entry := fmt.Sprintf("%d:%s:%s", session.Port, session.User, session.Name)
+	
+	// Remove any existing entry for this port
+	var updatedMappings []string
+	for _, mapping := range portMappings {
+		parts := strings.Split(mapping, ":")
+		if len(parts) >= 1 {
+			if existingPort := parts[0]; existingPort != fmt.Sprintf("%d", session.Port) {
+				updatedMappings = append(updatedMappings, mapping)
+			}
+		}
+	}
+	
+	// Add the new entry
+	updatedMappings = append(updatedMappings, entry)
+	
+	// Write back to file
+	content := strings.Join(updatedMappings, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	
+	return os.WriteFile(m.config.PortMapFile, []byte(content), 0644)
+}
+
+// removePortMapping removes entry from port_sessions.db
+func (m *Manager) removePortMapping(port int) error {
+	portMappings, err := m.readPortMappings()
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Remove the entry for this port
+	var updatedMappings []string
+	for _, mapping := range portMappings {
+		parts := strings.Split(mapping, ":")
+		if len(parts) >= 1 {
+			if existingPort := parts[0]; existingPort != fmt.Sprintf("%d", port) {
+				updatedMappings = append(updatedMappings, mapping)
+			}
+		}
+	}
+	
+	// Write back to file
+	content := strings.Join(updatedMappings, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	
+	return os.WriteFile(m.config.PortMapFile, []byte(content), 0644)
+}
+
+// readPortMappings reads all entries from port_sessions.db
+func (m *Manager) readPortMappings() ([]string, error) {
+	content, err := os.ReadFile(m.config.PortMapFile)
+	if err != nil {
+		return nil, err
+	}
+	
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	var mappings []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			mappings = append(mappings, line)
+		}
+	}
+	
+	return mappings, nil
 }

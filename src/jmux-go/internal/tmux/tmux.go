@@ -40,8 +40,12 @@ func (m *Manager) StartRegularSession() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Replace current process with tmux
-	return syscall.Exec("/usr/bin/tmux", []string{"tmux", "new-session"}, os.Environ())
+	// Get the tmux path and replace current process with tmux
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(tmuxPath, []string{"tmux", "new-session"}, os.Environ())
 }
 
 // AttachToSession attaches to an existing tmux session

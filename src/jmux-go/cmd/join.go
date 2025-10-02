@@ -24,6 +24,8 @@ Examples:
 		err := sessMgr.JoinSession(hostUser, sessionName)
 		if err != nil {
 			cmd.Printf("Error joining session: %v\n", err)
+			cmd.Printf("Tip: Try 'jmux sessions' to see available sessions\n")
+			cmd.Printf("Usage: jmux join <host-user> [session-name]\n")
 			return
 		}
 	},

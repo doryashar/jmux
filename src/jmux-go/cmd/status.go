@@ -24,6 +24,13 @@ func init() {
 }
 
 func showStatus() {
+	// Clean up stale sessions first
+	cleaned := performCleanup()
+	if cleaned > 0 {
+		color.Yellow("🧹 Cleaned up %d stale session(s)", cleaned)
+		fmt.Println()
+	}
+
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
 		color.Red("❌ Unable to determine current user")
