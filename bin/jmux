@@ -1,0 +1,2157 @@
+#!/usr/bin/env bash
+
+# jmux - Tmux session sharing made easy
+# Version: 2.0
+
+set -euo pipefail
+
+JMUX_PORT="${JMUX_PORT:-12345}"
+JMUX_SHARED_DIR="${JMUX_SHARED_DIR:-/projects/common/work/dory/jmux}"
+JMUX_CONFIG_DIR="${HOME}/.config/jmux"
+JMUX_SETSIZE_SCRIPT="${JMUX_CONFIG_DIR}/setsize.sh"
+
+# Real-time messaging configuration
+JMUX_REALTIME="${JMUX_REALTIME:-true}"
+JMUX_NOTIFICATION_DURATION="${JMUX_NOTIFICATION_DURATION:-5}"
+JMUX_WATCHER_PID_FILE="${JMUX_CONFIG_DIR}/watcher.pid"
+
+# Shared storage files
+JMUX_MESSAGES_DIR="${JMUX_SHARED_DIR}/messages"
+JMUX_USERS_FILE="${JMUX_SHARED_DIR}/users.db"
+JMUX_SESSIONS_DIR="${JMUX_SHARED_DIR}/sessions"
+JMUX_PORT_MAP="${JMUX_SHARED_DIR}/port_sessions.db"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Real-time messaging functions
+
+# Display message in non-intrusive overlay at bottom of terminal
+display_realtime_message() {
+    local msg_file="$1"
+    
+    # Skip if real-time notifications are disabled
+    [[ "${JMUX_REALTIME}" != "true" ]] && return 0
+    
+    # Skip if not in an interactive terminal
+    [[ ! -t 1 ]] && return 0
+    
+    # Parse message
+    if [[ ! -f "${msg_file}" ]]; then
+        return 1
+    fi
+    
+    local FROM TYPE TIMESTAMP DATA PRIORITY
+    source "${msg_file}"
+    
+    # Get terminal dimensions
+    local term_lines=$(tput lines 2>/dev/null || echo "24")
+    local term_cols=$(tput cols 2>/dev/null || echo "80")
+    
+    # Save cursor position
+    printf '\033[s'
+    
+    # Move to bottom of screen
+    printf '\033[%d;1H' "$term_lines"
+    
+    # Clear line and display message with background
+    printf '\033[K\033[7m'  # Clear line and reverse video
+    
+    case "${TYPE:-MESSAGE}" in
+        INVITE)
+            printf " 📨 INVITE from ${FROM}: Join session '${DATA}' | jmux join ${FROM} "
+            ;;
+        URGENT)
+            printf " 🚨 URGENT from ${FROM}: ${DATA} "
+            ;;
+        MESSAGE)
+            printf " 💬 MSG from ${FROM}: ${DATA} "
+            ;;
+        *)
+            printf " 📢 ${TYPE} from ${FROM}: ${DATA} "
+            ;;
+    esac
+    
+    # Pad to fill line width
+    local msg_len=$((${#FROM} + ${#DATA} + ${#TYPE} + 20))
+    local padding=$((term_cols - msg_len))
+    if [[ $padding -gt 0 ]]; then
+        printf "%*s" "$padding" ""
+    fi
+    
+    printf '\033[0m'  # Reset video
+    
+    # Restore cursor position
+    printf '\033[u'
+    
+    # Auto-hide after duration
+    (
+        sleep "${JMUX_NOTIFICATION_DURATION}"
+        # Clear bottom line
+        printf '\033[s\033[%d;1H\033[K\033[u' "$term_lines"
+    ) &
+}
+
+# Check if message watcher is running
+is_watcher_running() {
+    [[ -f "${JMUX_WATCHER_PID_FILE}" ]] || return 1
+    local pid=$(cat "${JMUX_WATCHER_PID_FILE}" 2>/dev/null)
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# Start background message watcher
+start_message_watcher() {
+    # Skip if real-time notifications are disabled
+    [[ "${JMUX_REALTIME}" != "true" ]] && return 0
+    
+    # Skip if already running
+    is_watcher_running && return 0
+    
+    # Skip if inotifywait is not available
+    if ! command -v inotifywait &> /dev/null; then
+        echo -e "${YELLOW}Warning: inotifywait not found, real-time messages disabled${NC}" >&2
+        echo -e "${BLUE}Install with: sudo apt-get install inotify-tools${NC}" >&2
+        return 0  # Don't fail, just disable real-time messaging
+    fi
+    
+    # Start watcher in background
+    (
+        # Monitor messages directory for new files
+        inotifywait -m -q -e create,moved_to --format '%f' "${JMUX_MESSAGES_DIR}" 2>/dev/null | while read filename; do
+            # Check if this message is for current user
+            if [[ "$filename" =~ ^${USER}_.*\.msg$ ]]; then
+                local msg_file="${JMUX_MESSAGES_DIR}/${filename}"
+                
+                # Wait a moment for file to be fully written
+                sleep 0.1
+                
+                # Display message if file exists and is readable
+                if [[ -f "$msg_file" && -r "$msg_file" ]]; then
+                    display_realtime_message "$msg_file"
+                fi
+            fi
+        done
+    ) &
+    
+    local watcher_pid=$!
+    echo "$watcher_pid" > "${JMUX_WATCHER_PID_FILE}"
+    
+    echo -e "${GREEN}✓ Real-time message watcher started (PID: $watcher_pid)${NC}"
+}
+
+# Stop background message watcher
+stop_message_watcher() {
+    if [[ -f "${JMUX_WATCHER_PID_FILE}" ]]; then
+        local pid=$(cat "${JMUX_WATCHER_PID_FILE}" 2>/dev/null)
+        if [[ -n "$pid" ]]; then
+            # Kill watcher and its children
+            pkill -P "$pid" 2>/dev/null || true
+            kill "$pid" 2>/dev/null || true
+            echo -e "${BLUE}✓ Message watcher stopped${NC}"
+        fi
+        rm -f "${JMUX_WATCHER_PID_FILE}"
+    fi
+}
+
+# Initialize config directory
+init_config() {
+    mkdir -p "${JMUX_CONFIG_DIR}"
+    mkdir -p "${JMUX_MESSAGES_DIR}"
+    mkdir -p "${JMUX_SESSIONS_DIR}"
+    
+    # Initialize port mapping file
+    touch "${JMUX_PORT_MAP}"
+    
+    # Setup jmux symlink in ~/.local/bin for easy access (optional)
+    setup_jmux_symlink || true  # Don't fail if symlink creation fails
+    
+    # Create setsize script if it doesn't exist or is outdated
+    local needs_update=false
+    if [[ ! -f "${JMUX_SETSIZE_SCRIPT}" ]]; then
+        needs_update=true
+    elif ! grep -q "Source jmux profile" "${JMUX_SETSIZE_SCRIPT}" 2>/dev/null; then
+        # Old version without profile sourcing
+        needs_update=true
+    fi
+    
+    if [[ "$needs_update" == "true" ]]; then
+        # Find tmux path
+        local tmux_path=$(command -v tmux 2>/dev/null || echo "tmux")
+        
+        cat > "${JMUX_SETSIZE_SCRIPT}" << 'EOF'
+#!/bin/bash
+#stty rows 50 cols 254
+
+# Source jmux profile to ensure PATH and jmux availability
+if [[ -f "$HOME/.config/jmux/profile.sh" ]]; then
+    source "$HOME/.config/jmux/profile.sh"
+fi
+
+# Determine session name from port mapping or fallback to hostname
+SESSION_NAME=""
+if [[ -n "${SOCAT_SOCKPORT:-}" ]]; then
+    # Get session name from port mapping
+    PORT_MAP_FILE="${JMUX_SHARED_DIR:-/projects/common/work/dory/jmux}/port_sessions.db"
+    if [[ -f "$PORT_MAP_FILE" ]]; then
+        SESSION_NAME=$(grep "^${SOCAT_SOCKPORT}:" "$PORT_MAP_FILE" 2>/dev/null | head -1 | cut -d: -f3)
+    fi
+fi
+
+# Fallback to hostname if no session name found
+if [[ -z "$SESSION_NAME" ]]; then
+    SESSION_NAME="${HOSTNAME:-$(hostname 2>/dev/null || echo "jmux-session")}"
+fi
+
+# Final safety check - ensure session name is never empty
+if [[ -z "$SESSION_NAME" ]]; then
+    SESSION_NAME="jmux-fallback-session"
+fi
+
+# Try multiple common tmux locations
+if command -v tmux &> /dev/null; then
+    exec tmux new -A -s "$SESSION_NAME"
+elif [[ -x "/bin/tmux" ]]; then
+    exec /bin/tmux new -A -s "$SESSION_NAME"
+elif [[ -x "/usr/bin/tmux" ]]; then
+    exec /usr/bin/tmux new -A -s "$SESSION_NAME"
+elif [[ -x "$HOME/.local/bin/tmux" ]]; then
+    exec $HOME/.local/bin/tmux new -A -s "$SESSION_NAME"
+else
+    echo "Error: tmux not found in any common location"
+    echo "Available paths:"
+    echo "  PATH: $PATH"
+    echo "Tried:"
+    echo "  - tmux (in PATH)"
+    echo "  - /bin/tmux"
+    echo "  - /usr/bin/tmux"
+    echo "  - $HOME/.local/bin/tmux"
+    exit 1
+fi
+EOF
+        chmod +x "${JMUX_SETSIZE_SCRIPT}"
+    fi
+    
+    # Create a profile script for tmux sessions
+    local profile_script="${JMUX_CONFIG_DIR}/profile.sh"
+    cat > "${profile_script}" << 'PROFILE_EOF'
+#!/bin/bash
+# jmux profile script - sourced in tmux sessions
+
+# Ensure ~/.local/bin is in PATH
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Ensure jmux is available if it exists in ~/.local/bin
+if [[ -x "$HOME/.local/bin/jmux" && ! -x "$(command -v jmux 2>/dev/null)" ]]; then
+    # Create a function to make jmux available
+    jmux() {
+        "$HOME/.local/bin/jmux" "$@"
+    }
+    export -f jmux
+fi
+PROFILE_EOF
+    chmod +x "${profile_script}"
+    
+    # Initialize users file if it doesn't exist
+    touch "${JMUX_USERS_FILE}"
+}
+
+# Tool selection functions
+get_socket_tool() {
+    # Get the directory where the jmux script is located
+    local script_path="${BASH_SOURCE[0]:-$0}"
+    local script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+    
+    if [[ -x "${script_dir}/jcat-binary" && -f "${script_dir}/jcat-binary" ]]; then
+        echo "${script_dir}/jcat-binary"
+    elif [[ -x "./jcat-binary" && -f "./jcat-binary" ]]; then
+        echo "./jcat-binary"
+    elif [[ -x "./jcat" && -f "./jcat" ]]; then
+        echo "./jcat"
+    elif command -v jcat &> /dev/null; then
+        echo "jcat"
+    elif command -v socat &> /dev/null; then
+        echo "socat"
+    else
+        echo ""
+    fi
+}
+
+start_socket_server() {
+    local port="$1"
+    local setsize_script="$2"
+    local tool=$(get_socket_tool)
+    
+    if [[ "$tool" == *"jcat"* ]]; then
+        # Use jcat in server mode
+        JCAT_SETSIZE_SCRIPT="$setsize_script" "$tool" -server -listen ":$port" &
+        echo $!
+    elif [[ "$tool" == "socat" ]]; then
+        # Use socat
+        socat TCP-LISTEN:${port},fork EXEC:"bash --rcfile ${setsize_script}",pty,stderr,setsid,sigint,sane &
+        echo $!
+    else
+        echo "" # No tool available
+    fi
+}
+
+detect_server_type() {
+    local host="$1"
+    local port="$2"
+    
+    # Try to detect if it's a jcat (yamux) or socat server
+    # Send a small test and see if we get yamux protocol response
+    local test_result=$(timeout 2 bash -c "echo | nc -w 1 ${host} ${port}" 2>/dev/null | head -c 10)
+    
+    # If we get some data that looks like yamux protocol, it's probably jcat
+    # Otherwise assume it's socat
+    if [[ -n "$test_result" ]]; then
+        echo "socat"  # Most likely socat if we get immediate response
+    else
+        echo "unknown"  # Could be either, default to trying available tool
+    fi
+}
+
+connect_socket_client() {
+    local host="$1"
+    local port="$2"
+    local tool=$(get_socket_tool)
+    
+    # Prioritize jcat since most connections are jcat-based
+    if [[ "$tool" == *"jcat"* ]]; then
+        echo "Connecting with jcat..."
+        "$tool" -client -connect "${host}:${port}"
+    elif command -v socat &> /dev/null; then
+        echo "Connecting with socat..."
+        socat FILE:$(tty),raw,echo=0 TCP:${host}:${port}
+    else
+        echo -e "${RED}Error: Neither jcat nor socat is available${NC}"
+        return 1
+    fi
+}
+
+stop_socket_server() {
+    local port="$1"
+    local killed=false
+    
+    # Try to kill jcat-binary processes first
+    if pkill -f "jcat-binary -server -listen :${port}" 2>/dev/null; then
+        killed=true
+    fi
+    
+    # Try to kill jcat processes
+    if pkill -f "jcat -server -listen :${port}" 2>/dev/null; then
+        killed=true
+    fi
+    
+    # Then try socat processes
+    if pkill -f "socat TCP-LISTEN:${port}" 2>/dev/null; then
+        killed=true
+    fi
+    
+    if [[ "$killed" == "true" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Validation functions
+check_dependencies() {
+    local tool=$(get_socket_tool)
+    local missing=()
+    
+    # Check tmux separately for auto-installation
+    if ! command -v tmux &> /dev/null; then
+        echo -e "${YELLOW}tmux not found, attempting to install AppImage...${NC}"
+        install_tmux_appimage
+    fi
+    
+    # Check for socket tool (jcat or socat)
+    if [[ -z "$tool" ]]; then
+        echo -e "${RED}Error: Neither jcat nor socat is available${NC}" >&2
+        echo "Please install socat or build jcat before using jmux" >&2
+        exit 1
+    fi
+}
+
+# Install tmux AppImage if not available
+install_tmux_appimage() {
+    echo -e "${BLUE}Installing tmux AppImage...${NC}"
+    
+    # Ensure ~/.local/bin exists
+    mkdir -p "${HOME}/.local/bin"
+    
+    local tmux_path="${HOME}/.local/bin/tmux"
+    
+    # Download tmux AppImage
+    if command -v curl &> /dev/null && command -v wget &> /dev/null; then
+        echo -e "${BLUE}Downloading latest tmux AppImage...${NC}"
+        if curl -s https://api.github.com/repos/nelsonenzo/tmux-appimage/releases/latest | \
+           grep "browser_download_url.*appimage" | \
+           cut -d : -f 2,3 | \
+           tr -d \" | \
+           wget -qi - -O "${tmux_path}"; then
+            
+            chmod +x "${tmux_path}"
+            echo -e "${GREEN}✓ tmux AppImage installed to ${tmux_path}${NC}"
+            
+            # Add to PATH if not already there
+            ensure_local_bin_in_path
+            
+            # Verify installation
+            if "${tmux_path}" -V &> /dev/null; then
+                echo -e "${GREEN}✓ tmux installation verified${NC}"
+            else
+                echo -e "${RED}✗ tmux installation failed verification${NC}" >&2
+                rm -f "${tmux_path}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}✗ Failed to download tmux AppImage${NC}" >&2
+            echo -e "${YELLOW}Please install tmux manually${NC}" >&2
+            exit 1
+        fi
+    else
+        echo -e "${RED}Error: curl and wget are required for automatic tmux installation${NC}" >&2
+        echo -e "${YELLOW}Please install tmux manually or install curl/wget${NC}" >&2
+        exit 1
+    fi
+}
+
+# Ensure ~/.local/bin is in PATH
+ensure_local_bin_in_path() {
+    local local_bin="${HOME}/.local/bin"
+    
+    # Check if already in PATH
+    if [[ ":$PATH:" == *":$local_bin:"* ]]; then
+        return 0
+    fi
+    
+    echo -e "${YELLOW}Adding ${local_bin} to PATH...${NC}"
+    
+    # Determine shell config file
+    local shell_config=""
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        if [[ -f "${HOME}/.bashrc" ]]; then
+            shell_config="${HOME}/.bashrc"
+        elif [[ -f "${HOME}/.bash_profile" ]]; then
+            shell_config="${HOME}/.bash_profile"
+        fi
+    elif [[ -n "${ZSH_VERSION:-}" ]]; then
+        shell_config="${HOME}/.zshrc"
+    elif [[ -f "${HOME}/.profile" ]]; then
+        shell_config="${HOME}/.profile"
+    fi
+    
+    if [[ -n "$shell_config" ]]; then
+        # Add PATH export to shell config
+        echo '' >> "$shell_config"
+        echo '# Added by jmux for ~/.local/bin' >> "$shell_config"
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_config"
+        
+        # Also export for current session
+        export PATH="$HOME/.local/bin:$PATH"
+        
+        echo -e "${GREEN}✓ Added ${local_bin} to PATH in ${shell_config}${NC}"
+        echo -e "${YELLOW}Note: Restart your shell or run: source ${shell_config}${NC}"
+    else
+        echo -e "${YELLOW}Warning: Could not determine shell config file${NC}"
+        echo -e "${BLUE}Please manually add to your PATH: export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    fi
+}
+
+# Create symlink for jmux in ~/.local/bin if not there
+setup_jmux_symlink() {
+    local jmux_script=""
+    local local_bin="${HOME}/.local/bin"
+    local jmux_link="${local_bin}/jmux"
+    
+    # Try different methods to get absolute path
+    if command -v realpath &> /dev/null; then
+        jmux_script="$(realpath "$0" 2>/dev/null)" || jmux_script=""
+    fi
+    
+    # Fallback to readlink if realpath failed
+    if [[ -z "$jmux_script" ]] && command -v readlink &> /dev/null; then
+        jmux_script="$(readlink -f "$0" 2>/dev/null)" || jmux_script=""
+    fi
+    
+    # Fallback to manual resolution
+    if [[ -z "$jmux_script" ]]; then
+        if [[ "$0" = /* ]]; then
+            # Already absolute path
+            jmux_script="$0"
+        else
+            # Make relative path absolute
+            jmux_script="$(pwd)/$0"
+        fi
+    fi
+    
+    # Verify the script path exists and is readable
+    if [[ ! -r "$jmux_script" ]]; then
+        echo -e "${YELLOW}Warning: Cannot resolve jmux script path, skipping symlink creation${NC}" >&2
+        return 0
+    fi
+    
+    # Skip if we're already running from ~/.local/bin
+    if [[ "$jmux_script" == "$jmux_link" ]]; then
+        return 0
+    fi
+    
+    # Ensure ~/.local/bin exists
+    mkdir -p "$local_bin"
+    
+    # Create symlink if it doesn't exist or points to wrong location
+    if [[ ! -L "$jmux_link" ]] || [[ "$(readlink "$jmux_link" 2>/dev/null)" != "$jmux_script" ]]; then
+        echo -e "${BLUE}Creating jmux symlink in ${local_bin}...${NC}"
+        if ln -sf "$jmux_script" "$jmux_link" 2>/dev/null; then
+            echo -e "${GREEN}✓ jmux symlink created: ${jmux_link} -> ${jmux_script}${NC}"
+            
+            # Ensure ~/.local/bin is in PATH
+            ensure_local_bin_in_path
+        else
+            echo -e "${YELLOW}Warning: Failed to create symlink (permission denied)${NC}" >&2
+        fi
+    fi
+}
+
+check_shared_storage() {
+    if [[ ! -d "${JMUX_SHARED_DIR}" ]]; then
+        echo -e "${RED}Error: Shared storage not accessible: ${JMUX_SHARED_DIR}${NC}" >&2
+        exit 1
+    fi
+}
+
+check_port_available() {
+    if lsof -Pi :${JMUX_PORT} -sTCP:LISTEN -t >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+in_tmux() {
+    [[ -n "${TMUX:-}" ]]
+}
+
+# Check if string is a valid IP address
+is_ip_address() {
+    local ip="$1"
+    local IFS='.'
+    read -ra parts <<< "$ip"
+    
+    # Must have exactly 4 parts
+    [[ ${#parts[@]} -eq 4 ]] || return 1
+    
+    # Each part must be 0-255
+    for part in "${parts[@]}"; do
+        # Must be numeric
+        [[ "$part" =~ ^[0-9]+$ ]] || return 1
+        # Must be 0-255
+        (( part >= 0 && part <= 255 )) || return 1
+    done
+    
+    return 0
+}
+
+# Check if string could be a hostname (contains dots or letters)
+is_hostname() {
+    local host="$1"
+    
+    # Should not be a pure IP address
+    is_ip_address "$host" && return 1
+    
+    # Must contain letters, dots, or hyphens (indicating hostname structure)
+    [[ "$host" =~ [a-zA-Z.-] ]] || return 1
+    
+    # If it contains a dot, it's likely a hostname
+    [[ "$host" =~ \. ]] && return 0
+    
+    # If it contains hyphens, it's likely a hostname
+    [[ "$host" =~ - ]] && return 0
+    
+    # If it's all letters without numbers, treat as username
+    [[ "$host" =~ ^[a-zA-Z]+$ ]] && return 1
+    
+    # Mixed alphanumeric with letters suggests hostname
+    [[ "$host" =~ [a-zA-Z] ]] && [[ "$host" =~ [0-9] ]] && return 0
+    
+    # Default to not hostname (treat as username)
+    return 1
+}
+
+# User/IP management
+register_user() {
+    local user="${USER}"
+    local ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    
+    if [[ -z "${ip}" ]]; then
+        echo -e "${RED}Error: Could not determine IP address${NC}" >&2
+        return 1
+    fi
+    
+    # Update or add user entry
+    local temp_file=$(mktemp)
+    grep -v "^${user}:" "${JMUX_USERS_FILE}" 2>/dev/null > "${temp_file}" || true
+    echo "${user}:${ip}:$(date +%s)" >> "${temp_file}"
+    mv "${temp_file}" "${JMUX_USERS_FILE}"
+    chmod 777 ${JMUX_USERS_FILE}
+    
+    echo -e "${GREEN}✓ Registered ${user} -> ${ip}${NC}"
+}
+
+get_user_ip() {
+    local user="$1"
+    local entry=$(grep "^${user}:" "${JMUX_USERS_FILE}" 2>/dev/null || true)
+    
+    if [[ -z "${entry}" ]]; then
+        echo -e "${RED}Error: User '${user}' not found in user database${NC}" >&2
+        echo -e "${YELLOW}Available users:${NC}" >&2
+        list_users_db >&2
+        return 1
+    fi
+    
+    echo "${entry}" | cut -d: -f2
+}
+
+list_users_db() {
+    if [[ ! -s "${JMUX_USERS_FILE}" ]]; then
+        echo -e "${YELLOW}No users registered yet${NC}"
+        return
+    fi
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Registered Users${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    while IFS=: read -r user ip timestamp; do
+        local time_ago=$(($(date +%s) - timestamp))
+        local hours=$((time_ago / 3600))
+        local mins=$(((time_ago % 3600) / 60))
+        echo -e "  ${CYAN}${user}${NC} -> ${YELLOW}${ip}${NC} (updated ${hours}h ${mins}m ago)"
+    done < "${JMUX_USERS_FILE}"
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# Message system
+send_message() {
+    local to_user="$1"
+    local msg_type="$2"
+    local msg_data="$3"
+    local priority="${4:-normal}"
+    
+    local msg_file="${JMUX_MESSAGES_DIR}/${to_user}_$(date +%s%N).msg"
+    
+    cat > "${msg_file}" << EOF
+FROM=${USER}
+TYPE=${msg_type}
+TIMESTAMP=$(date +%s)
+DATA=${msg_data}
+PRIORITY=${priority}
+READ=false
+EOF
+    
+    echo -e "${GREEN}✓ ${msg_type} sent to ${to_user}${NC}"
+}
+
+# Send different types of messages
+send_invite() {
+    local user="$1"
+    local session="$2"
+    
+    echo -e "${BLUE}Sending invite to ${user}...${NC}"
+    send_message "${user}" "INVITE" "${session}" "high"
+}
+
+send_urgent_message() {
+    local to_user="$1"
+    local message="$2"
+    
+    echo -e "${RED}Sending urgent message to ${to_user}...${NC}"
+    send_message "${to_user}" "URGENT" "${message}" "urgent"
+}
+
+send_regular_message() {
+    local to_user="$1"
+    local message="$2"
+    
+    echo -e "${BLUE}Sending message to ${to_user}...${NC}"
+    send_message "${to_user}" "MESSAGE" "${message}" "normal"
+}
+
+read_messages() {
+    local user="${USER}"
+    
+    # Find all messages for this user
+    local messages=$(find "${JMUX_MESSAGES_DIR}" -name "${user}_*.msg" 2>/dev/null | sort)
+    
+    if [[ -z "${messages}" ]]; then
+        return
+    fi
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}New Messages${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    while IFS= read -r msg_file; do
+        if [[ -f "${msg_file}" ]]; then
+            source "${msg_file}"
+            
+            case "${TYPE}" in
+                INVITE)
+                    echo -e "${CYAN}From: ${FROM}${NC}"
+                    echo -e "  ${YELLOW}Invitation to join session${NC}"
+                    echo -e "  Session: ${DATA}"
+                    echo -e "  To join: ${GREEN}jmux join ${FROM}${NC}"
+                    ;;
+                *)
+                    echo -e "${CYAN}From: ${FROM}${NC}"
+                    echo -e "  ${DATA}"
+                    ;;
+            esac
+            
+            # Remove processed message
+            rm -f "${msg_file}"
+        fi
+    done <<< "${messages}"
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# Port to session mapping functions
+register_port_session() {
+    local port="$1"
+    local user="$2"
+    local session_name="$3"
+    
+    # Ensure the port mapping file exists
+    touch "${JMUX_PORT_MAP}"
+    
+    # Remove any existing mapping for this port
+    grep -v "^${port}:" "${JMUX_PORT_MAP}" 2>/dev/null > "${JMUX_PORT_MAP}.tmp" || true
+    
+    # Add new mapping
+    echo "${port}:${user}:${session_name}" >> "${JMUX_PORT_MAP}.tmp"
+    mv "${JMUX_PORT_MAP}.tmp" "${JMUX_PORT_MAP}"
+    chmod 666 "${JMUX_PORT_MAP}" 2>/dev/null || true
+}
+
+unregister_port_session() {
+    local port="$1"
+    
+    if [[ -f "${JMUX_PORT_MAP}" ]]; then
+        grep -v "^${port}:" "${JMUX_PORT_MAP}" 2>/dev/null > "${JMUX_PORT_MAP}.tmp" || true
+        mv "${JMUX_PORT_MAP}.tmp" "${JMUX_PORT_MAP}"
+        chmod 666 "${JMUX_PORT_MAP}" 2>/dev/null || true
+    fi
+}
+
+get_session_from_port() {
+    local port="$1"
+    
+    if [[ -f "${JMUX_PORT_MAP}" ]]; then
+        local mapping=$(grep "^${port}:" "${JMUX_PORT_MAP}" 2>/dev/null | head -1)
+        if [[ -n "$mapping" ]]; then
+            echo "$mapping" | cut -d: -f3
+            return 0
+        fi
+    fi
+    
+    # Fallback to hostname if no mapping found
+    echo "${HOSTNAME}"
+    return 1
+}
+
+# Session management
+register_session() {
+    local session_name="$1"
+    local port="$2"
+    local private_share="$3"
+    shift 3
+    local allowed_users=("$@")
+    
+    local session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+    
+    cat > "${session_file}" << EOF
+USER=${USER}
+SESSION=${session_name}
+PORT=${port}
+STARTED=$(date +%s)
+PID=$$
+PRIVATE=${private_share}
+ALLOWED_USERS=$(IFS=","; echo "${allowed_users[*]}")
+EOF
+    
+    # Register port-to-session mapping
+    register_port_session "${port}" "${USER}" "${session_name}"
+    
+    echo "${session_file}"
+}
+
+unregister_session() {
+    local session_name="$1"
+    local session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+    
+    # Get port from session file before removing it
+    if [[ -f "${session_file}" ]]; then
+        local port=$(grep "^PORT=" "${session_file}" 2>/dev/null | cut -d'=' -f2)
+        if [[ -n "$port" ]]; then
+            unregister_port_session "${port}"
+        fi
+    fi
+    
+    rm -f "${session_file}"
+}
+
+get_user_session() {
+    local user="$1"
+    local session_file=$(find "${JMUX_SESSIONS_DIR}" -name "${user}_*.session" 2>/dev/null | head -1)
+    
+    if [[ -z "${session_file}" || ! -f "${session_file}" ]]; then
+        echo -e "${RED}Error: No active session found for user '${user}'${NC}" >&2
+        return 1
+    fi
+    
+    echo "${session_file}"
+}
+
+list_sessions() {
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Active Shared Sessions${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    local found=0
+    for session_file in "${JMUX_SESSIONS_DIR}"/*.session; do
+        if [[ -f "${session_file}" ]]; then
+            source "${session_file}"
+            
+            # Check if the session is still active (tmux session exists and socat is running)
+            local session_active=true
+            
+            # Check if tmux session exists
+            if ! tmux has-session -t "${SESSION}" 2>/dev/null; then
+                session_active=false
+            fi
+            
+            # Check if socat process is running on the port
+            if ! lsof -i :"${PORT}" -P -n 2>/dev/null | grep -q "LISTEN"; then
+                session_active=false
+            fi
+            
+            if [[ "$session_active" == "false" ]]; then
+                echo -e "${YELLOW}  Cleaning up stale session: ${USER}/${SESSION}${NC}"
+                rm -f "${session_file}"
+                continue
+            fi
+            
+            local uptime=$(($(date +%s) - STARTED))
+            local hours=$((uptime / 3600))
+            local mins=$(((uptime % 3600) / 60))
+            
+            echo -e "  ${CYAN}${USER}${NC}/${YELLOW}${SESSION}${NC} - Port ${PORT} (${hours}h ${mins}m)"
+            found=1
+        fi
+    done
+    
+    if [[ ${found} -eq 0 ]]; then
+        echo -e "${YELLOW}  No active shared sessions${NC}"
+    fi
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# Core functions
+start_regular() {
+    check_dependencies
+    register_user
+    
+    # Start real-time message watcher (gracefully handles missing inotify)
+    if ! start_message_watcher; then
+        echo -e "${YELLOW}Real-time messaging unavailable. Messages will be checked manually.${NC}"
+        echo -e "${BLUE}Use 'jmux messages' to check for new messages.${NC}"
+    fi
+    
+    read_messages
+    echo -e "${GREEN}Starting tmux session...${NC}"
+    tmux new -A -s "${HOSTNAME}"
+}
+
+is_session_shared() {
+    local session_name="$1"
+    local session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+    [[ -f "${session_file}" ]]
+}
+
+# Get current session context information
+get_session_context() {
+    local context="none"
+    local session_name=""
+    local is_host=false
+    local session_file=""
+    local host_user=""
+    
+    if in_tmux; then
+        session_name=$(tmux display-message -p '#S' 2>/dev/null || echo "")
+        
+        if [[ -n "$session_name" ]]; then
+            # Check if we're hosting this session
+            session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+            if [[ -f "$session_file" ]]; then
+                context="hosting"
+                is_host=true
+            else
+                # Check if this is someone else's shared session
+                for file in "${JMUX_SESSIONS_DIR}/"*_"${session_name}.session"; do
+                    if [[ -f "$file" ]]; then
+                        context="joined"
+                        host_user=$(basename "$file" | cut -d'_' -f1)
+                        break
+                    fi
+                done
+                
+                # If no exact match, check if we joined via direct connection
+                if [[ "$context" == "none" ]] && [[ "$session_name" =~ ^[0-9]+$ ]]; then
+                    # Session name is just a port number, likely joined via IP
+                    context="joined_direct"
+                fi
+            fi
+        fi
+    fi
+    
+    echo "context=$context"
+    echo "session_name=$session_name"
+    echo "is_host=$is_host"
+    echo "host_user=${host_user:-}"
+    echo "session_file=${session_file:-}"
+}
+
+# Check if current session is a shared session (hosting or joined)
+in_shared_session() {
+    local context_info=$(get_session_context)
+    local context=$(echo "$context_info" | grep "^context=" | cut -d'=' -f2)
+    [[ "$context" != "none" ]]
+}
+
+# Check if we're hosting the current session
+hosting_session() {
+    local context_info=$(get_session_context)
+    local is_host=$(echo "$context_info" | grep "^is_host=" | cut -d'=' -f2)
+    [[ "$is_host" == "true" ]]
+}
+
+find_available_port() {
+    local port=${JMUX_PORT}
+    local max_attempts=10
+    
+    for ((i=0; i<max_attempts; i++)); do
+        if lsof -Pi :${port} -sTCP:LISTEN -t >/dev/null 2>&1; then
+            port=$((port + 1))
+        else
+            echo "${port}"
+            return 0
+        fi
+    done
+    
+    echo -e "${RED}Error: Could not find available port${NC}" >&2
+    return 1
+}
+
+start_share() {
+    check_dependencies
+    check_shared_storage
+    
+    local invite_users=()
+    local session_name=""
+    local private_share=false
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --name)
+                session_name="$2"
+                shift 2
+                ;;
+            --private)
+                private_share=true
+                shift
+                ;;
+            *)
+                # All non-flag arguments are users to invite
+                invite_users+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    if ! in_tmux; then
+        echo -e "${YELLOW}Not in a tmux session. Starting new session with sharing...${NC}"
+        
+        # Register user IP
+        register_user
+        
+        # Find available port
+        local port=$(find_available_port) || exit 1
+        
+        # Generate session name
+        if [[ -z "${session_name}" ]]; then
+            if [[ ${#invite_users[@]} -gt 0 ]]; then
+                # Use hostname and invitees
+                local invitees_str=$(IFS="-"; echo "${invite_users[*]}")
+                session_name="${HOSTNAME}-${invitees_str}"
+            else
+                session_name="${HOSTNAME}"
+            fi
+        fi
+        
+        # Ensure unique session name
+        local base_session_name="${session_name}"
+        local counter=1
+        
+        while tmux has-session -t "${session_name}" 2>/dev/null; do
+            session_name="${base_session_name}_${counter}"
+            counter=$((counter + 1))
+        done
+        
+        # Create a wrapper script to run inside tmux
+        local wrapper_script=$(mktemp)
+        cat > "${wrapper_script}" << WRAPPER_EOF
+#!/usr/bin/env bash
+SESSION_NAME="${session_name}"
+PORT="${port}"
+SETSIZE_SCRIPT="${JMUX_SETSIZE_SCRIPT}"
+export PATH="${PATH}:${HOME}/.local/bin:${JMUX_SHARED_DIR}"
+#"${HOME}/.config/jmux/setsize.sh"
+JMUX_SESSIONS_DIR="${JMUX_SHARED_DIR}/sessions"
+
+# Source jmux profile to ensure PATH and jmux availability
+if [[ -f "\$HOME/.config/jmux/profile.sh" ]]; then
+    source "\$HOME/.config/jmux/profile.sh"
+fi
+
+# Register this session
+SESSION_FILE="\${JMUX_SESSIONS_DIR}/\${USER}_\${SESSION_NAME}.session"
+cat > "\${SESSION_FILE}" << EOF
+USER=\${USER}
+SESSION=\${SESSION_NAME}
+PORT=\${PORT}
+STARTED=\$(date +%s)
+PID=\$\$
+PRIVATE=${private_share}
+ALLOWED_USERS=$(if [[ ${#invite_users[@]} -gt 0 ]]; then IFS=","; echo "${invite_users[*]}"; fi)
+EOF
+
+# Register port-to-session mapping
+PORT_MAP_FILE="${JMUX_SHARED_DIR}/port_sessions.db"
+touch "\${PORT_MAP_FILE}"
+grep -v "^\${PORT}:" "\${PORT_MAP_FILE}" 2>/dev/null > "\${PORT_MAP_FILE}.tmp" || true
+echo "\${PORT}:\${USER}:\${SESSION_NAME}" >> "\${PORT_MAP_FILE}.tmp"
+mv "\${PORT_MAP_FILE}.tmp" "\${PORT_MAP_FILE}"
+chmod 666 "\${PORT_MAP_FILE}" 2>/dev/null || true
+
+# Start socket server in background
+USING=jcat
+if [[ -x "./jcat-binary" ]]; then
+    JCAT_SETSIZE_SCRIPT="\${SETSIZE_SCRIPT}" ./jcat-binary -server -listen ":\${PORT}" &
+    SOCKET_PID=\$!
+elif [[ -x "./jcat" ]]; then
+    JCAT_SETSIZE_SCRIPT="\${SETSIZE_SCRIPT}" ./jcat -server -listen ":\${PORT}" &
+    SOCKET_PID=\$!
+elif command -v jcat &> /dev/null; then
+    JCAT_SETSIZE_SCRIPT="\${SETSIZE_SCRIPT}" jcat -server -listen ":\${PORT}" &
+    SOCKET_PID=\$!
+else
+    USING=socat
+    socat TCP-LISTEN:\${PORT},fork EXEC:"bash --rcfile \${SETSIZE_SCRIPT}",pty,stderr,setsid,sigint,sane &
+    SOCKET_PID=\$!
+fi
+
+echo "Sharing started on port \${PORT} (PID: \${SOCKET_PID}) using \${USING}"
+
+# Update tmux status line to show sharing info
+update_tmux_status() {
+    local current_session=\$(tmux display-message -p '#S' 2>/dev/null || echo "")
+    if [[ -n "\${current_session}" ]]; then
+        local connection_count=\$(lsof -i :\${PORT} -P -n 2>/dev/null | tail -n +2 | wc -l || echo "0")
+        local status_msg="[SHARED] Join: jmux join \${USER} | Connections: \${connection_count}"
+        tmux set-option -g status-right "\${status_msg}" 2>/dev/null || true
+        tmux set-option -g status-right-length 100 2>/dev/null || true
+    fi
+}
+
+# Set initial status
+update_tmux_status
+
+# Monitor tmux session and update status
+monitor_session() {
+    while true; do
+        sleep 30
+        # Check if tmux session still exists
+        if ! tmux has-session -t "\${SESSION_NAME}" 2>/dev/null; then
+            echo "Tmux session \${SESSION_NAME} no longer exists, cleaning up..."
+            cleanup
+            break
+        fi
+        update_tmux_status
+    done
+}
+
+monitor_session &
+STATUS_UPDATE_PID=\$!
+
+# Cleanup function
+cleanup() {
+    echo "Stopping share..."
+    kill \${SOCKET_PID} 2>/dev/null || true
+    kill \${STATUS_UPDATE_PID} 2>/dev/null || true
+    # Kill any orphaned socket processes on this port  
+    pkill -f "jcat-binary -server -listen :\${PORT}" 2>/dev/null || true
+    pkill -f "jcat -server -listen :\${PORT}" 2>/dev/null || true
+    pkill -f "socat TCP-LISTEN:\${PORT}" 2>/dev/null || true
+    # Restore original tmux status
+    tmux set-option -g status-right "" 2>/dev/null || true
+    # Remove session file
+    rm -f "\${SESSION_FILE}"
+    # Remove port mapping
+    if [[ -f "\${PORT_MAP_FILE}" ]]; then
+        grep -v "^\${PORT}:" "\${PORT_MAP_FILE}" 2>/dev/null > "\${PORT_MAP_FILE}.tmp" || true
+        mv "\${PORT_MAP_FILE}.tmp" "\${PORT_MAP_FILE}"
+    fi
+    exit
+}
+
+trap cleanup EXIT INT TERM
+
+# Keep the shell running
+exec \${SHELL}
+WRAPPER_EOF
+        chmod +x "${wrapper_script}"
+        
+        # Export needed variables
+        export JMUX_SHARED_DIR
+        
+        echo -e "${GREEN}Creating new shared session: ${CYAN}${session_name}${GREEN} on port ${YELLOW}${port}${NC}"
+        
+        # Send invites before starting tmux if users specified
+        if [[ ${#invite_users[@]} -gt 0 ]]; then
+            for invite_user in "${invite_users[@]}"; do
+                send_invite "${invite_user}" "${session_name}"
+            done
+        fi
+        
+        # Start tmux with the wrapper
+        tmux new -A -s "${session_name}" "${wrapper_script}"
+        
+        # Cleanup
+        rm -f "${wrapper_script}"
+        
+    else
+        # Already in tmux - check if already sharing
+        local session_name=$(tmux display-message -p '#S')
+        
+        if is_session_shared "${session_name}"; then
+            echo -e "${YELLOW}This session is already shared.${NC}"
+            echo ""
+            show_share_info
+            exit 0
+        fi
+        
+        # Start sharing in current session
+        echo -e "${GREEN}Starting share in current tmux session...${NC}"
+        
+        register_user
+        
+        # Find available port
+        local port=$(find_available_port) || exit 1
+        
+        # Register session
+        if [[ ${#invite_users[@]} -gt 0 ]]; then
+            register_session "${session_name}" "${port}" "${private_share}" "${invite_users[@]}"
+        else
+            register_session "${session_name}" "${port}" "${private_share}"
+        fi
+        
+        # Create a monitoring script that will kill socat when tmux session ends
+        local monitor_script=$(mktemp)
+        cat > "${monitor_script}" << MONITOR_EOF
+#!/usr/bin/env bash
+SESSION_NAME="${session_name}"
+PORT="${port}"
+SOCKET_PID=""
+
+# Start socket server in background
+if [[ -x "./jcat-binary" ]]; then
+    JCAT_SETSIZE_SCRIPT="${JMUX_SETSIZE_SCRIPT}" ./jcat-binary -server -listen ":\${PORT}" &
+    SOCKET_PID=\$!
+elif [[ -x "./jcat" ]]; then
+    JCAT_SETSIZE_SCRIPT="${JMUX_SETSIZE_SCRIPT}" ./jcat -server -listen ":\${PORT}" &
+    SOCKET_PID=\$!
+elif command -v jcat &> /dev/null; then
+    JCAT_SETSIZE_SCRIPT="${JMUX_SETSIZE_SCRIPT}" jcat -server -listen ":\${PORT}" &
+    SOCKET_PID=\$!
+else
+    socat TCP-LISTEN:\${PORT},fork EXEC:"bash --rcfile ${JMUX_SETSIZE_SCRIPT}",pty,stderr,setsid,sigint,sane &
+    SOCKET_PID=\$!
+fi
+
+echo "✓ Sharing started on port \${PORT} (PID: \${SOCKET_PID})"
+
+# Update tmux status line to show sharing info
+update_tmux_status_inline() {
+    local connection_count=\$(lsof -i :\${PORT} -P -n 2>/dev/null | tail -n +2 | wc -l || echo "0")
+    local status_msg="[SHARED] Join: jmux join ${USER} | Connections: \${connection_count}"
+    tmux set-option -g status-right "\${status_msg}" 2>/dev/null || true
+    tmux set-option -g status-right-length 100 2>/dev/null || true
+}
+
+# Set initial status
+update_tmux_status_inline
+
+# Monitor tmux session and kill socat when session ends
+(
+    while true; do
+        sleep 30
+        # Check if tmux session still exists
+        if ! tmux has-session -t "\${SESSION_NAME}" 2>/dev/null; then
+            echo "Tmux session '\${SESSION_NAME}' ended, stopping socat..."
+            kill \${SOCAT_PID} 2>/dev/null || true
+            tmux set-option -g status-right "" 2>/dev/null || true
+            rm -f "${JMUX_SESSIONS_DIR}/${USER}_\${SESSION_NAME}.session"
+            # Remove port mapping
+            PORT_MAP_FILE="${JMUX_SHARED_DIR}/port_sessions.db"
+            if [[ -f "\${PORT_MAP_FILE}" ]]; then
+                grep -v "^\${PORT}:" "\${PORT_MAP_FILE}" 2>/dev/null > "\${PORT_MAP_FILE}.tmp" || true
+                mv "\${PORT_MAP_FILE}.tmp" "\${PORT_MAP_FILE}"
+            fi
+            break
+        fi
+        
+        # Update status if socat is still running
+        if kill -0 \${SOCAT_PID} 2>/dev/null; then
+            update_tmux_status_inline
+        else
+            echo "Socat process ended, cleaning up..."
+            tmux set-option -g status-right "" 2>/dev/null || true
+            rm -f "${JMUX_SESSIONS_DIR}/${USER}_\${SESSION_NAME}.session"
+            # Remove port mapping
+            PORT_MAP_FILE="${JMUX_SHARED_DIR}/port_sessions.db"
+            if [[ -f "\${PORT_MAP_FILE}" ]]; then
+                grep -v "^\${PORT}:" "\${PORT_MAP_FILE}" 2>/dev/null > "\${PORT_MAP_FILE}.tmp" || true
+                mv "\${PORT_MAP_FILE}.tmp" "\${PORT_MAP_FILE}"
+            fi
+            break
+        fi
+    done
+) &
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up sharing..."
+    kill \${SOCAT_PID} 2>/dev/null || true
+    tmux set-option -g status-right "" 2>/dev/null || true
+    rm -f "${JMUX_SESSIONS_DIR}/${USER}_\${SESSION_NAME}.session"
+    # Remove port mapping
+    PORT_MAP_FILE="${JMUX_SHARED_DIR}/port_sessions.db"
+    if [[ -f "\${PORT_MAP_FILE}" ]]; then
+        grep -v "^\${PORT}:" "\${PORT_MAP_FILE}" 2>/dev/null > "\${PORT_MAP_FILE}.tmp" || true
+        mv "\${PORT_MAP_FILE}.tmp" "\${PORT_MAP_FILE}"
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+# Keep script running while tmux session exists
+while tmux has-session -t "\${SESSION_NAME}" 2>/dev/null; do
+    sleep 10
+done
+
+cleanup
+MONITOR_EOF
+        chmod +x "${monitor_script}"
+        
+        # Start monitoring script in background
+        nohup "${monitor_script}" > /dev/null 2>&1 &
+        local monitor_pid=$!
+        
+        # Remove the temporary script after a delay
+        (sleep 5; rm -f "${monitor_script}") &
+        
+        echo -e "${GREEN}✓ Sharing started on port ${port} (Monitor PID: ${monitor_pid})${NC}"
+        echo -e "${YELLOW}Note: Share will stop when tmux session ends or when you run 'jmux stop'${NC}"
+        
+        # Send invites if users specified
+        if [[ ${#invite_users[@]} -gt 0 ]]; then
+            for invite_user in "${invite_users[@]}"; do
+                send_invite "${invite_user}" "${session_name}"
+            done
+        fi
+        
+        show_share_info
+    fi
+}
+
+
+join_session() {
+    check_dependencies
+    check_shared_storage
+    
+    local user_or_host="$1"
+    local session_name="$2"
+    
+    # If no user/host specified, try to find invitations
+    if [[ -z "${user_or_host}" ]]; then
+        local invite_msg=$(find "${JMUX_MESSAGES_DIR}" -name "${USER}_*.msg" -exec grep -l "TYPE=INVITE" {} \; 2>/dev/null | head -1)
+        
+        if [[ -n "${invite_msg}" ]]; then
+            source "${invite_msg}"
+            user_or_host="${FROM}"
+            if [[ -n "${session_name}" ]]; then
+                session_name="${session_name}"
+            else
+                session_name="${DATA}"
+            fi
+            echo -e "${GREEN}Auto-joining ${CYAN}${user_or_host}${GREEN}'s session${NC}"
+            rm -f "${invite_msg}"
+        else
+            echo -e "${RED}Error: No user/host specified and no pending invitations found${NC}" >&2
+            echo "Usage: jmux join <user|hostname|ip> [session-name]" >&2
+            exit 1
+        fi
+    fi
+    
+    # Determine if input is IP address, hostname, or username
+    local host=""
+    local user=""
+    local connection_type=""
+    
+    if is_ip_address "${user_or_host}"; then
+        host="${user_or_host}"
+        connection_type="IP"
+        echo -e "${BLUE}Connecting directly to IP: ${host}${NC}"
+    elif is_hostname "${user_or_host}"; then
+        host="${user_or_host}"
+        connection_type="hostname"
+        echo -e "${BLUE}Connecting directly to hostname: ${host}${NC}"
+    else
+        # Treat as username - look up IP
+        user="${user_or_host}"
+        host=$(get_user_ip "${user}") || exit 1
+        connection_type="username"
+    fi
+    
+    # Handle session discovery based on connection type
+    local session_file=""
+    local port=""
+    
+    if [[ "${connection_type}" == "username" ]]; then
+        # Username-based connection - use session files
+        if [[ -n "${session_name}" ]]; then
+            session_file="${JMUX_SESSIONS_DIR}/${user}_${session_name}.session"
+            if [[ ! -f "${session_file}" ]]; then
+                echo -e "${RED}Error: Session '${session_name}' not found for user '${user}'${NC}" >&2
+                echo -e "${YELLOW}Available sessions for ${user}:${NC}" >&2
+                find "${JMUX_SESSIONS_DIR}" -name "${user}_*.session" -exec basename {} .session \; | sed "s/^${user}_/  /" >&2
+                return 1
+            fi
+        else
+            session_file=$(get_user_session "${user}") || exit 1
+        fi
+        
+        source "${session_file}"
+        
+        # Check if session is private and user is allowed
+        if [[ "${PRIVATE:-false}" == "true" ]]; then
+            if [[ -n "${ALLOWED_USERS}" ]]; then
+                IFS=',' read -ra allowed_array <<< "${ALLOWED_USERS}"
+                local user_allowed=false
+                for allowed_user in "${allowed_array[@]}"; do
+                    if [[ "${allowed_user}" == "${USER}" ]]; then
+                        user_allowed=true
+                        break
+                    fi
+                done
+                
+                if [[ "${user_allowed}" != "true" ]]; then
+                    echo -e "${RED}Error: You are not authorized to join this private session${NC}" >&2
+                    return 1
+                fi
+            else
+                echo -e "${RED}Error: This is a private session with no authorized users${NC}" >&2
+                return 1
+            fi
+        fi
+        
+        port="${PORT}"
+        echo -e "${GREEN}Connecting to ${CYAN}${user}${GREEN}'s session (${SESSION}) at ${host}:${port}...${NC}"
+    else
+        # Direct IP/hostname connection - use default port or scan
+        if [[ -n "${session_name}" && "${session_name}" =~ ^[0-9]+$ ]]; then
+            # Session name is actually a port number
+            port="${session_name}"
+            echo -e "${GREEN}Connecting to ${host}:${port}...${NC}"
+        else
+            # Use default port
+            port="${JMUX_PORT}"
+            echo -e "${GREEN}Connecting to ${host}:${port} (default port)...${NC}"
+            if [[ -n "${session_name}" ]]; then
+                echo -e "${YELLOW}Note: Session name '${session_name}' ignored for direct connections${NC}"
+            fi
+        fi
+    fi
+    
+    echo -e "${YELLOW}Press Ctrl+C to disconnect${NC}\n"
+    
+    # Save current terminal settings
+    saved_settings=$(stty -g 2>/dev/null) || saved_settings=""
+    cleanup_done=false
+    
+    # Setup cleanup function to restore terminal
+    cleanup_terminal() {
+        if [[ "${cleanup_done:-false}" == "true" ]]; then
+            return 0
+        fi
+        cleanup_done=true
+        
+        echo -e "\n${BLUE}Restoring terminal settings...${NC}"
+        if [[ -n "${saved_settings:-}" ]]; then
+            stty "${saved_settings}" 2>/dev/null || true
+        fi
+        stty sane 2>/dev/null || true
+        # Reset terminal completely
+        reset 2>/dev/null || true
+        echo -e "${GREEN}✓ Terminal restored${NC}"
+    }
+    
+    # Set trap to cleanup on exit
+    trap cleanup_terminal EXIT INT TERM
+    
+    # Connect with socket client
+    connect_socket_client "${host}" "${port}"
+    
+    # Cleanup after connection ends (will be skipped if already done by trap)
+    cleanup_terminal
+}
+
+show_share_info() {
+    local session_name=$(tmux display-message -p '#S' 2>/dev/null || echo "${HOSTNAME}")
+    local session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+    
+    if [[ ! -f "${session_file}" ]]; then
+        echo -e "${YELLOW}No active share in current session${NC}"
+        return
+    fi
+    
+    source "${session_file}"
+    
+    local uptime=$(($(date +%s) - STARTED))
+    local hours=$((uptime / 3600))
+    local mins=$(((uptime % 3600) / 60))
+    
+    local ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Current Shared Session${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  User: ${CYAN}${USER}${NC}"
+    echo -e "  Session: ${YELLOW}${SESSION}${NC}"
+    echo -e "  Port: ${YELLOW}${PORT}${NC}"
+    echo -e "  IP: ${YELLOW}${ip}${NC}"
+    echo -e "  Uptime: ${YELLOW}${hours}h ${mins}m${NC}"
+    echo -e "\n${BLUE}Others can join with:${NC}"
+    echo -e "  ${GREEN}jmux join ${USER}${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+list_connected_users() {
+    check_dependencies
+    
+    if ! in_tmux; then
+        echo -e "${YELLOW}Not in a tmux session${NC}"
+        exit 0
+    fi
+    
+    local context_info=$(get_session_context)
+    local context=$(echo "$context_info" | grep "^context=" | cut -d'=' -f2)
+    local session_name=$(echo "$context_info" | grep "^session_name=" | cut -d'=' -f2)
+    local host_user=$(echo "$context_info" | grep "^host_user=" | cut -d'=' -f2)
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Connected Users${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Session: ${CYAN}${session_name}${NC}"
+    
+    case "$context" in
+        "hosting")
+            echo -e "  Role: ${GREEN}Host${NC} (you are sharing this session)"
+            ;;
+        "joined")
+            echo -e "  Role: ${BLUE}Guest${NC} (in ${host_user}'s session)"
+            echo -e "  Host: ${CYAN}${host_user}${NC}"
+            ;;
+        "joined_direct")
+            echo -e "  Role: ${BLUE}Guest${NC} (direct connection)"
+            ;;
+        *)
+            echo -e "  Role: ${YELLOW}Regular${NC} (not shared)"
+            ;;
+    esac
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if ! tmux has-session -t "${session_name}" 2>/dev/null; then
+        echo -e "${YELLOW}Session not found${NC}"
+        exit 0
+    fi
+    
+    local client_count=$(tmux list-clients -t "${session_name}" 2>/dev/null | wc -l)
+    echo -e "  Connected clients: ${YELLOW}${client_count}${NC}"
+    echo ""
+    
+    tmux list-clients -t "${session_name}" -F "  #{client_name} - #{client_activity}" 2>/dev/null || \
+        echo -e "${YELLOW}  No clients connected${NC}"
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Show network connections if sharing
+    local session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+    if [[ -f "${session_file}" ]]; then
+        source "${session_file}"
+        echo -e "\n${BLUE}Network Connections (Port ${PORT}):${NC}"
+        lsof -i :${PORT} -P -n 2>/dev/null | tail -n +2 | while read line; do
+            echo -e "  ${line}"
+        done || echo -e "${YELLOW}  No network connections${NC}"
+    fi
+}
+
+stop_share() {
+    local target_sessions=("$@")
+    
+    # If no specific sessions provided, stop current session
+    if [[ ${#target_sessions[@]} -eq 0 ]]; then
+        local current_session=$(tmux display-message -p '#S' 2>/dev/null || echo "${HOSTNAME}")
+        target_sessions=("$current_session")
+    fi
+    
+    local stopped_count=0
+    local total_count=${#target_sessions[@]}
+    
+    echo -e "${BLUE}Stopping ${total_count} session(s)...${NC}"
+    
+    for session_name in "${target_sessions[@]}"; do
+        local session_file="${JMUX_SESSIONS_DIR}/${USER}_${session_name}.session"
+        
+        if [[ ! -f "${session_file}" ]]; then
+            echo -e "${YELLOW}⚠ Session '${session_name}' is not being shared or doesn't exist${NC}"
+            continue
+        fi
+        
+        # Check if this is our session
+        if ! source "${session_file}" 2>/dev/null; then
+            echo -e "${RED}✗ Failed to read session file for '${session_name}'${NC}"
+            continue
+        fi
+        
+        echo -e "${YELLOW}Stopping shared session '${session_name}'...${NC}"
+        
+        # Kill socket processes on this port
+        if stop_socket_server "${PORT}"; then
+            echo -e "${GREEN}  ✓ Stopped socket process on port ${PORT}${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ No socket process found on port ${PORT}${NC}"
+        fi
+        
+        # Restore original tmux status if we're in this session
+        if [[ -n "${TMUX:-}" ]]; then
+            local current_session=$(tmux display-message -p '#S' 2>/dev/null)
+            if [[ "$current_session" == "$session_name" ]]; then
+                tmux set-option -g status-right "" 2>/dev/null || true
+                echo -e "${GREEN}  ✓ Restored tmux status for current session${NC}"
+            fi
+        fi
+        
+        # Remove session file
+        rm -f "${session_file}"
+        echo -e "${GREEN}  ✓ Removed session registry${NC}"
+        
+        # Remove port mapping
+        unregister_port_session "${PORT}"
+        echo -e "${GREEN}  ✓ Removed port mapping${NC}"
+        
+        ((stopped_count++))
+    done
+    
+    if [[ $stopped_count -eq 0 ]]; then
+        echo -e "${YELLOW}No sessions were stopped${NC}"
+        return 1
+    elif [[ $stopped_count -eq 1 ]]; then
+        echo -e "${GREEN}✓ Stopped 1 shared session${NC}"
+        echo -e "${BLUE}Note: Tmux session(s) are still running${NC}"
+    else
+        echo -e "${GREEN}✓ Stopped ${stopped_count} shared sessions${NC}"
+        echo -e "${BLUE}Note: Tmux sessions are still running${NC}"
+    fi
+}
+
+cleanup_orphaned_socket() {
+    echo -e "${BLUE}Cleaning up orphaned socket processes...${NC}"
+    
+    # Find and kill socket processes that are listening on jmux ports
+    local killed=0
+    
+    # Kill jcat-binary processes running on jmux ports
+    while IFS= read -r pid; do
+        if [[ -n "$pid" ]]; then
+            echo -e "${YELLOW}Killing orphaned jcat-binary process (PID: $pid)${NC}"
+            kill "$pid" 2>/dev/null || true
+            killed=$((killed + 1))
+        fi
+    done < <(pgrep -f "jcat-binary -server -listen" 2>/dev/null || true)
+    
+    # Kill jcat processes running on jmux ports
+    while IFS= read -r pid; do
+        if [[ -n "$pid" ]]; then
+            echo -e "${YELLOW}Killing orphaned jcat process (PID: $pid)${NC}"
+            kill "$pid" 2>/dev/null || true
+            killed=$((killed + 1))
+        fi
+    done < <(pgrep -f "jcat -server -listen" 2>/dev/null || true)
+    
+    # Kill socat processes running on jmux ports
+    while IFS= read -r pid; do
+        if [[ -n "$pid" ]]; then
+            echo -e "${YELLOW}Killing orphaned socat process (PID: $pid)${NC}"
+            kill "$pid" 2>/dev/null || true
+            killed=$((killed + 1))
+        fi
+    done < <(pgrep -f "socat TCP-LISTEN:.*EXEC:.*jmux" 2>/dev/null || true)
+    
+    # Also clean up any session files for non-existent tmux sessions
+    local cleaned_sessions=0
+    for session_file in "${JMUX_SESSIONS_DIR}/${USER}_"*.session; do
+        if [[ -f "$session_file" ]]; then
+            source "$session_file"
+            if ! tmux has-session -t "${SESSION}" 2>/dev/null; then
+                echo -e "${YELLOW}Removing stale session file: ${session_file}${NC}"
+                rm -f "$session_file"
+                cleaned_sessions=$((cleaned_sessions + 1))
+            fi
+        fi
+    done
+    
+    if [[ $killed -eq 0 && $cleaned_sessions -eq 0 ]]; then
+        echo -e "${GREEN}✓ No orphaned processes found${NC}"
+    else
+        echo -e "${GREEN}✓ Cleanup complete: ${killed} processes killed, ${cleaned_sessions} stale sessions removed${NC}"
+    fi
+}
+
+show_session_context() {
+    if ! in_tmux; then
+        echo -e "${YELLOW}Not in a tmux session${NC}"
+        return 0
+    fi
+    
+    local context_info=$(get_session_context)
+    local context=$(echo "$context_info" | grep "^context=" | cut -d'=' -f2)
+    local session_name=$(echo "$context_info" | grep "^session_name=" | cut -d'=' -f2)
+    local host_user=$(echo "$context_info" | grep "^host_user=" | cut -d'=' -f2)
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Session Context${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Session: ${CYAN}${session_name}${NC}"
+    
+    case "$context" in
+        "hosting")
+            echo -e "  Role: ${GREEN}Host${NC} (you are sharing this session)"
+            echo -e "  Commands: ${YELLOW}jmux stop${NC} to stop sharing, ${YELLOW}jmux users${NC} to see connected users"
+            ;;
+        "joined")
+            echo -e "  Role: ${BLUE}Guest${NC} (joined ${host_user}'s session)"
+            echo -e "  Host: ${CYAN}${host_user}${NC}"
+            echo -e "  Commands: ${YELLOW}jmux msg ${host_user}${NC} to message host, ${YELLOW}exit${NC} to leave session"
+            ;;
+        "joined_direct") 
+            echo -e "  Role: ${BLUE}Guest${NC} (joined via direct connection)"
+            echo -e "  Commands: ${YELLOW}exit${NC} to leave session"
+            ;;
+        *)
+            echo -e "  Role: ${YELLOW}Regular${NC} (not shared)"
+            echo -e "  Commands: ${YELLOW}jmux share${NC} to start sharing"
+            ;;
+    esac
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+show_status() {
+    check_shared_storage
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}jmux Status${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if in_tmux; then
+        echo -e "  Current: ${GREEN}In tmux session${NC}"
+        
+        # Show session context
+        local context_info=$(get_session_context)
+        local context=$(echo "$context_info" | grep "^context=" | cut -d'=' -f2)
+        local session_name=$(echo "$context_info" | grep "^session_name=" | cut -d'=' -f2)
+        local host_user=$(echo "$context_info" | grep "^host_user=" | cut -d'=' -f2)
+        
+        case "$context" in
+            "hosting")
+                echo -e "  Role: ${GREEN}Host${NC} (sharing session: ${CYAN}${session_name}${NC})"
+                ;;
+            "joined")
+                echo -e "  Role: ${BLUE}Guest${NC} (in ${host_user}'s session: ${CYAN}${session_name}${NC})"
+                ;;
+            "joined_direct")
+                echo -e "  Role: ${BLUE}Guest${NC} (direct connection to session: ${CYAN}${session_name}${NC})"
+                ;;
+            *)
+                echo -e "  Role: ${YELLOW}Regular${NC} (session: ${CYAN}${session_name}${NC})"
+                ;;
+        esac
+        
+        show_share_info
+    else
+        echo -e "  Current: ${YELLOW}Not in tmux${NC}"
+    fi
+    
+    # Show messaging system status
+    echo ""
+    echo -e "${BLUE}Messaging System:${NC}"
+    if command -v inotifywait &> /dev/null; then
+        if is_watcher_running; then
+            local pid=$(cat "${JMUX_WATCHER_PID_FILE}" 2>/dev/null)
+            echo -e "  Real-time: ${GREEN}✓ Active (PID: ${pid})${NC}"
+        else
+            echo -e "  Real-time: ${YELLOW}✗ Stopped${NC} (run 'jmux watch start')"
+        fi
+    else
+        echo -e "  Real-time: ${RED}✗ Unavailable${NC} (install inotify-tools)"
+        echo -e "  Fallback: ${BLUE}Manual polling active${NC}"
+    fi
+    
+    echo ""
+    list_sessions
+    
+    echo ""
+    list_users_db
+    
+    # Check for messages
+    local msg_count=$(find "${JMUX_MESSAGES_DIR}" -name "${USER}_*.msg" 2>/dev/null | wc -l)
+    if [[ ${msg_count} -gt 0 ]]; then
+        echo ""
+        read_messages
+    fi
+}
+
+reset_terminal() {
+    echo -e "${BLUE}Resetting terminal settings...${NC}"
+    
+    # Reset terminal state
+    stty sane 2>/dev/null || true
+    reset 2>/dev/null || true
+    
+    # Disable mouse reporting if stuck
+    printf '\033[?1000l\033[?1002l\033[?1015l\033[?1006l' 2>/dev/null || true
+    
+    # Clear screen
+    clear 2>/dev/null || true
+    
+    echo -e "${GREEN}✓ Terminal reset complete${NC}"
+    echo -e "${YELLOW}If mouse is still not working, try: ${NC}printf '\\033[?1000l'"
+}
+
+# Message management commands
+manage_message_watcher() {
+    local action="$1"
+    
+    case "${action}" in
+        start)
+            start_message_watcher
+            ;;
+        stop)
+            stop_message_watcher
+            ;;
+        status)
+            if is_watcher_running; then
+                local pid=$(cat "${JMUX_WATCHER_PID_FILE}" 2>/dev/null)
+                echo -e "${GREEN}✓ Message watcher is running (PID: ${pid})${NC}"
+            else
+                echo -e "${YELLOW}✗ Message watcher is not running${NC}"
+            fi
+            ;;
+        restart)
+            stop_message_watcher
+            sleep 1
+            start_message_watcher
+            ;;
+        *)
+            echo -e "${RED}Error: Unknown watcher action '${action}'${NC}" >&2
+            echo "Usage: jmux watch {start|stop|status|restart}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+send_message_cmd() {
+    local to_user="$1"
+    local message_type="${2:-message}"
+    shift 2
+    local message="$*"
+    
+    if [[ -z "${to_user}" || -z "${message}" ]]; then
+        echo -e "${RED}Error: Missing user or message${NC}" >&2
+        echo "Usage: jmux msg <user> [type] <message>" >&2
+        echo "Types: message (default), urgent" >&2
+        exit 1
+    fi
+    
+    case "${message_type}" in
+        urgent)
+            send_urgent_message "${to_user}" "${message}"
+            ;;
+        message|msg)
+            send_regular_message "${to_user}" "${message}"
+            ;;
+        *)
+            # Treat second argument as part of message if not a valid type
+            message="${message_type} ${message}"
+            send_regular_message "${to_user}" "${message}"
+            ;;
+    esac
+}
+
+show_help() {
+    cat << 'EOF'
+jmux - Tmux Session Sharing Made Easy
+
+USAGE:
+    jmux [command] [options]
+
+COMMANDS:
+    (no args)           Start a regular tmux session (register and check messages)
+    share [users...] [options]  Start sharing current/new session
+        [users...]      Users to invite (space-separated, optional)
+        --name <name>   Set custom session name (optional)
+        --private       Make session private (only invited users can join)
+    join [user|hostname|ip] [session-name|port]  Join a shared session
+        - If no target specified, auto-join from pending invitations
+        - For usernames: session-name selects specific session
+        - For hostname/IP: second argument can be port number
+        - Defaults to port 12345 for direct connections
+    stop [sessions...]  Stop sharing current session or specific sessions
+    cleanup             Clean up orphaned socket processes and stale session files
+    users               List connected users in current session (session-aware)
+    list-users          List all registered users with IPs
+    sessions            List all active shared sessions
+    messages            Check for new messages
+    msg <user> [type] <message>  Send message to user (type: message, urgent)
+    watch {start|stop|status|restart}  Manage real-time message watcher
+    install             Create symlink in ~/.local/bin for global access
+    update-scripts      Update internal scripts (fixes tmux detection issues)
+    status              Show detailed status (session-aware)
+    context             Show current session context and available actions
+    reset               Reset terminal settings (use if mouse/keyboard is broken)
+    help, --help        Show this help message
+
+ENVIRONMENT VARIABLES:
+    JMUX_PORT           Port to use for sharing (default: 12345)
+    JMUX_SHARED_DIR     Shared storage path (default: /projects/common/work/dory)
+    JMUX_REALTIME       Enable real-time messages (default: true)
+    JMUX_NOTIFICATION_DURATION  Message display duration in seconds (default: 5)
+
+EXAMPLES:
+    # Start regular tmux session (registers your IP)
+    jmux
+
+    # Share your current/new session
+    jmux share
+
+    # Share and invite users
+    jmux share alice bob charlie
+
+    # Share with custom session name
+    jmux share --name dory
+
+    # Share with users and custom name
+    jmux share alice bob --name dory
+
+    # Create private session
+    jmux share --private alice bob
+
+    # Join someone's shared session by username
+    jmux join bob
+
+    # Join specific session by username
+    jmux join dory mysession
+
+    # Join by IP address (default port)
+    jmux join 192.168.1.100
+
+    # Join by IP address with specific port
+    jmux join 192.168.1.100 12346
+
+    # Join by hostname
+    jmux join server.example.com
+
+    # Join by hostname with specific port
+    jmux join server.example.com 54321
+
+    # Auto-join from invitation
+    jmux join
+
+    # List all connected users
+    jmux users
+
+    # List registered users and their IPs
+    jmux list-users
+
+    # Stop sharing current session
+    jmux stop
+
+    # Stop sharing specific sessions
+    jmux stop session1 session2
+
+    # Stop all your shared sessions (use with sessions command)
+    jmux stop $(jmux sessions | grep "^${USER}_" | cut -d'_' -f2- | cut -d'.' -f1)
+
+    # Clean up orphaned socat processes
+    jmux cleanup
+
+    # Check current status (shows session context)
+    jmux status
+
+    # Show detailed session context and available actions
+    jmux context
+
+    # List connected users with session context
+    jmux users
+
+    # Reset terminal if mouse/keyboard is broken after session
+    jmux reset
+
+    # Send a message to a user
+    jmux msg alice "Hey, can you help with the deployment?"
+
+    # Send an urgent message
+    jmux msg bob urgent "Server is down, need immediate help!"
+
+    # Manage real-time message watcher
+    jmux watch status
+    jmux watch restart
+
+    # Update internal scripts (if experiencing tmux detection issues)
+    jmux update-scripts
+
+    # Tmux pass-through commands (jmux extends tmux)
+    jmux ls                 # Enhanced session listing
+    jmux new mysession      # Create new tmux session
+    jmux attach mysession   # Attach to tmux session
+    jmux kill-session old   # Kill tmux session
+
+CONFIGURATION:
+    Local config: ~/.config/jmux/
+    Shared data: $JMUX_SHARED_DIR/
+    
+FILES:
+    users.db       - User to IP mapping
+    messages/      - Message queue
+    sessions/      - Active session registry
+
+TMUX INTEGRATION:
+    - jmux extends tmux - any unrecognized command is forwarded to tmux
+    - Examples: 'jmux ls', 'jmux new mysession', 'jmux attach', etc.
+    - Enhanced with session awareness and helpful tips
+    - Use 'jmux ls' instead of 'tmux ls' for enhanced session listing
+
+NOTES:
+    - Requires jcat or socat to be installed (tmux auto-installs if missing)
+    - If tmux not found, automatically downloads and installs tmux AppImage
+    - Creates symlink in ~/.local/bin for easy access from anywhere
+    - Automatically adds ~/.local/bin to PATH if needed
+    - Requires shared storage access
+    - Users are automatically registered when they run jmux
+    - Sharing runs inside tmux and stops when session ends
+    - Messages are passed via shared storage files
+    - Shared sessions show status in tmux footer with join command and connection count
+    - Status line updates every 30 seconds while sharing is active
+    - Real-time messaging requires inotify-tools package (optional for instant notifications)
+    - Without inotify-tools, messaging works with manual 'jmux messages' command
+    - Messages appear automatically at bottom of terminal when real-time is enabled
+
+EOF
+}
+
+# Forward unknown commands to tmux with session awareness
+forward_to_tmux() {
+    local cmd="$1"
+    shift
+    
+    if ! command -v tmux &> /dev/null; then
+        echo -e "${RED}Error: Unknown jmux command '${cmd}' and tmux not found${NC}" >&2
+        echo "Run 'jmux help' for usage information" >&2
+        exit 1
+    fi
+    
+    # Common tmux commands that should be forwarded
+    local known_tmux_commands=(
+        "ls" "list-sessions" "list-clients" "list-windows" "list-panes"
+        "kill-session" "kill-server" "new-session" "new" "attach-session" 
+        "attach" "a" "detach-client" "detach" "has-session" "refresh-client"
+        "source-file" "show-options" "set-option" "display-message"
+        "capture-pane" "send-keys" "copy-mode" "paste-buffer" "show-buffer"
+        "delete-buffer" "list-buffers" "rename-session" "rename-window"
+        "move-window" "link-window" "unlink-window" "break-pane" "join-pane"
+        "resize-pane" "select-pane" "select-window" "next-window"
+        "previous-window" "last-window" "rotate-window" "swap-pane"
+        "swap-window" "split-window" "splitw" "new-window" "neww"
+        "clock-mode" "suspend-client" "lock-session" "lock-client"
+        "lock-server" "run-shell" "if-shell" "wait-for"
+    )
+    
+    # Check if it's a known tmux command
+    local is_tmux_command=false
+    for tmux_cmd in "${known_tmux_commands[@]}"; do
+        if [[ "$cmd" == "$tmux_cmd" ]]; then
+            is_tmux_command=true
+            break
+        fi
+    done
+    
+    # If not in known list, test if it's a valid tmux command
+    if [[ "$is_tmux_command" == "false" ]]; then
+        if tmux list-commands 2>/dev/null | grep -q "^$cmd "; then
+            is_tmux_command=true
+        fi
+    fi
+    
+    if [[ "$is_tmux_command" == "true" ]]; then
+        # Add session awareness for certain commands
+        case "$cmd" in
+            "ls"|"list-sessions")
+                echo -e "${BLUE}📋 Tmux sessions (jmux-enhanced):${NC}" >&2
+                tmux "$cmd" "$@"
+                echo ""
+                echo -e "${BLUE}💡 Tip: Use 'jmux sessions' to see shared sessions${NC}" >&2
+                ;;
+            "attach"|"attach-session"|"a")
+                if [[ $# -eq 0 ]] && in_tmux; then
+                    echo -e "${YELLOW}Already in tmux session. Use 'jmux join <user>' to join shared sessions${NC}" >&2
+                    exit 0
+                else
+                    echo -e "${BLUE}🔗 Attaching to tmux session...${NC}" >&2
+                    exec tmux "$cmd" "$@"
+                fi
+                ;;
+            "new"|"new-session")
+                echo -e "${BLUE}🆕 Creating new tmux session...${NC}" >&2
+                echo -e "${YELLOW}💡 Tip: Use 'jmux share' to make it shareable${NC}" >&2
+                exec tmux "$cmd" "$@"
+                ;;
+            *)
+                echo -e "${BLUE}🔄 Forwarding to tmux: ${cmd}${NC}" >&2
+                exec tmux "$cmd" "$@"
+                ;;
+        esac
+    else
+        echo -e "${RED}Error: Unknown command '${cmd}'${NC}" >&2
+        echo -e "${BLUE}Available commands:${NC}" >&2
+        echo -e "  • ${GREEN}jmux commands${NC}: Run 'jmux help'" >&2
+        echo -e "  • ${GREEN}tmux commands${NC}: Run 'tmux list-commands' or 'man tmux'" >&2
+        exit 1
+    fi
+}
+
+# Main command dispatcher
+main() {
+    local cmd="${1:-}"
+    
+    # Handle install command early (doesn't need full init)
+    if [[ "$cmd" == "install" ]]; then
+        echo -e "${BLUE}Installing jmux symlink...${NC}"
+        mkdir -p "${HOME}/.local/bin" 2>/dev/null || true
+        setup_jmux_symlink
+        return
+    fi
+    
+    init_config
+    
+    case "${cmd}" in
+        "")
+            start_regular
+            ;;
+        share)
+            shift
+            start_share "$@"
+            ;;
+        join)
+            # Ensure config is initialized on the joining machine
+            init_config
+            join_session "${2:-}" "${3:-}"
+            ;;
+        stop)
+            shift
+            stop_share "$@"
+            ;;
+        cleanup)
+            cleanup_orphaned_socket
+            ;;
+        users)
+            list_connected_users
+            ;;
+        list-users)
+            check_shared_storage
+            list_users_db
+            ;;
+        sessions)
+            check_shared_storage
+            list_sessions
+            ;;
+        messages)
+            check_shared_storage
+            read_messages
+            ;;
+        status)
+            show_status
+            ;;
+        context)
+            show_session_context
+            ;;
+        reset)
+            reset_terminal
+            ;;
+        msg)
+            shift
+            send_message_cmd "$@"
+            ;;
+        watch)
+            manage_message_watcher "${2:-status}"
+            ;;
+        update-scripts)
+            echo -e "${BLUE}Updating jmux scripts...${NC}"
+            # Force setsize script regeneration
+            rm -f "${JMUX_SETSIZE_SCRIPT}"
+            init_config
+            echo -e "${GREEN}✓ Scripts updated successfully${NC}"
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            # Try to pass through to tmux for unrecognized commands
+            forward_to_tmux "${cmd}" "${@:2}"
+            ;;
+    esac
+}
+
+main "$@"
