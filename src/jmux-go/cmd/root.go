@@ -9,12 +9,14 @@ import (
 	"jmux/internal/config"
 	"jmux/internal/messaging"
 	"jmux/internal/session"
+	"jmux/internal/tmux"
 )
 
 var (
 	cfg       *config.Config
 	msgSystem *messaging.Messaging
 	sessMgr   *session.Manager
+	tmuxMgr   *tmux.Manager
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -40,6 +42,11 @@ Features:
 	Run: func(cmd *cobra.Command, args []string) {
 		// If no subcommand, start a regular tmux session
 		startRegularSession()
+	},
+	// Handle unknown commands as tmux passthrough
+	SilenceUsage: true,
+	FParseErrWhitelist: cobra.FParseErrWhitelist{
+		UnknownFlags: true,
 	},
 }
 
@@ -70,8 +77,9 @@ func initializeSystem() {
 		color.Yellow("Warning: Could not start live monitoring: %v", err)
 	}
 
-	// Initialize session manager
+	// Initialize managers
 	sessMgr = session.NewManager(cfg, msgSystem)
+	tmuxMgr = tmux.NewManager()
 
 	// Register user in database
 	registerCurrentUser()
@@ -79,11 +87,10 @@ func initializeSystem() {
 
 // startRegularSession starts a regular tmux session
 func startRegularSession() {
-	color.Blue("🔄 Starting regular tmux session...")
-	color.Yellow("💡 Tip: Use 'jmux share' to make it shareable")
-	
-	// TODO: Start tmux session
-	fmt.Println("Regular tmux session would start here")
+	if err := tmuxMgr.StartRegularSession(); err != nil {
+		color.Red("Error starting tmux session: %v", err)
+		os.Exit(1)
+	}
 }
 
 // registerCurrentUser registers the current user in the database

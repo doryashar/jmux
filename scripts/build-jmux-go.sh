@@ -20,9 +20,9 @@ cd "$SRC_DIR"
 echo "Getting Go dependencies..."
 go mod tidy
 
-# Build the binary
-echo "Building binary..."
-CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -o "$BIN_DIR/jmux-go" .
+# Build the binary (fully static for portability)
+echo "Building static binary..."
+CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -tags netgo -installsuffix netgo -o "$BIN_DIR/jmux-go" .
 
 echo "✓ jmux-go built successfully at $BIN_DIR/jmux-go"
 

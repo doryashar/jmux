@@ -24,6 +24,7 @@ type Config struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
+	// defaultSharedDir := filepath.Join(homeDir, ".jmux", "shared")
 	sharedDir := getEnvOrDefault("JMUX_SHARED_DIR", "/projects/common/work/dory/jmux")
 	configDir := filepath.Join(homeDir, ".config", "jmux")
 

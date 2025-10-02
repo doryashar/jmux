@@ -319,8 +319,10 @@ set -x
 This project is provided as-is for internal use.
 
 # TODO: 
-[ ] need to validate the join-session permissions, how is it handled?
-[ ] add security (password / encryption / pem etc)
-[ ] use different version of socat to allow sigwitch? https://github.com/StalkR/misc/tree/master/pty
-[ ] add "ask for share" that is doing reverse sharing
-[ ] live monitor without inotify
+[ ]   need to validate the join-session permissions, how is it handled?
+[ ]   add security (password / encryption / pem etc)
+[ ]   use different version of socat to allow sigwitch? https://github.com/StalkR/misc/tree/master/pty
+[ ]   add "ask for share" that is doing reverse sharing
+[ ]   live monitor without inotify
+[ ]   every share should also show the share command the the host (if there are more than one, the session name is preferred to be shown)
+      if not using a shared directory - you should display the full ip:port in your join command.

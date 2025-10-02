@@ -59,10 +59,24 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		sessionName = fmt.Sprintf("session-%d", time.Now().Unix())
 	}
 
+	// Get session name - use provided name or current session
+	tmuxSessionName := sessionName
+	if m.isInTmuxSession() {
+		// Get current session name if we're already in tmux
+		cmd := exec.Command("tmux", "display-message", "-p", "#S")
+		output, err := cmd.Output()
+		if err == nil {
+			tmuxSessionName = strings.TrimSpace(string(output))
+		}
+		color.Blue("📋 Sharing current tmux session: %s", tmuxSessionName)
+	} else {
+		color.Blue("🔄 Starting tmux session '%s'...", tmuxSessionName)
+	}
+
 	// Register the session
 	session := &Session{
 		User:         currentUser,
-		Name:         sessionName,
+		Name:         tmuxSessionName,
 		Port:         port,
 		Started:      time.Now().Unix(),
 		PID:          os.Getpid(),
@@ -76,20 +90,55 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 
 	// Send invitations
 	for _, user := range inviteUsers {
-		err := m.messaging.SendMessage(user, messaging.MessageTypeInvite, sessionName)
+		err := m.messaging.SendMessage(user, messaging.MessageTypeInvite, tmuxSessionName)
 		if err != nil {
 			color.Yellow("Failed to send invitation to %s: %v", user, err)
 		}
 	}
 
-	color.Green("✓ Session '%s' shared on port %d", sessionName, port)
+	color.Green("✓ Session '%s' shared on port %d", tmuxSessionName, port)
 	if len(inviteUsers) > 0 {
 		color.Cyan("📧 Invitations sent to: %s", strings.Join(inviteUsers, ", "))
 	}
 
-	// Start the jcat server
-	server := jcat.NewServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript)
-	return server.Start()
+	// If already in tmux, just start the server
+	if m.isInTmuxSession() {
+		server := jcat.NewServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript)
+		return server.Start()
+	}
+
+	// Create wrapper script to start jcat server in background
+	jmuxBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get current executable path: %v", err)
+	}
+	
+	wrapperScript := fmt.Sprintf(`#!/bin/bash
+# Start jcat server in background
+%s _internal_jcat_server %d %s &
+# Start a shell
+exec $SHELL
+`, jmuxBinary, port, m.config.SetSizeScript)
+
+	// Write wrapper script to temp file
+	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("jmux-wrapper-%d.sh", time.Now().UnixNano()))
+	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
+		return fmt.Errorf("failed to create wrapper script: %v", err)
+	}
+	defer os.Remove(wrapperPath) // Clean up on exit
+
+	color.Green("✓ Session '%s' shared on port %d", tmuxSessionName, port)
+	if len(inviteUsers) > 0 {
+		color.Cyan("📧 Invitations sent to: %s", strings.Join(inviteUsers, ", "))
+	}
+
+	// Start tmux with wrapper script (like bash version)
+	color.Blue("🔗 Starting shared tmux session...")
+	cmd := exec.Command("tmux", "new", "-A", "-s", tmuxSessionName, wrapperPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // JoinSession joins an existing session
@@ -131,7 +180,7 @@ func (m *Manager) StopShare(sessionNames []string) error {
 		return fmt.Errorf("unable to determine current user")
 	}
 
-	sessions, err := m.listUserSessions(currentUser)
+	sessions, err := m.ListUserSessions(currentUser)
 	if err != nil {
 		return err
 	}
@@ -244,7 +293,7 @@ ALLOWED_USERS=%s
 }
 
 func (m *Manager) findUserSession(user, sessionName string) (*Session, error) {
-	sessions, err := m.listUserSessions(user)
+	sessions, err := m.ListUserSessions(user)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +307,7 @@ func (m *Manager) findUserSession(user, sessionName string) (*Session, error) {
 	return nil, fmt.Errorf("session not found")
 }
 
-func (m *Manager) listUserSessions(user string) ([]*Session, error) {
+func (m *Manager) ListUserSessions(user string) ([]*Session, error) {
 	pattern := user + "_*.session"
 	matches, err := filepath.Glob(filepath.Join(m.config.SessionsDir, pattern))
 	if err != nil {
@@ -389,4 +438,8 @@ func (m *Manager) resolveHostIP(hostUser string) (string, error) {
 	}
 
 	return "", fmt.Errorf("user %s not found", hostUser)
+}
+
+func (m *Manager) isInTmuxSession() bool {
+	return os.Getenv("TMUX") != ""
 }

@@ -12,16 +12,23 @@ var (
 
 // shareCmd represents the share command
 var shareCmd = &cobra.Command{
-	Use:   "share",
+	Use:   "share [session-name]",
 	Short: "Share the current tmux session",
 	Long: `Share the current tmux session with other users.
 
 Examples:
   jmux share                              # Share current session publicly
+  jmux share tomere                       # Share with name 'tomere'
   jmux share --name mysession             # Share with custom name
   jmux share --private --invite user1,user2  # Private session with invites`,
 	Run: func(cmd *cobra.Command, args []string) {
-		err := sessMgr.StartShare(shareName, sharePrivate, shareInvite)
+		// Use positional argument if provided, otherwise use flag
+		sessionName := shareName
+		if len(args) > 0 {
+			sessionName = args[0]
+		}
+		
+		err := sessMgr.StartShare(sessionName, sharePrivate, shareInvite)
 		if err != nil {
 			cmd.Printf("Error starting share: %v\n", err)
 			return
