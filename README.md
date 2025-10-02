@@ -21,10 +21,12 @@ Enhanced tmux session sharing tool with support for named sessions, multiple inv
 ```
 jmux/
 ├── bin/                 # Compiled binaries
-│   ├── jmux            # Main jmux script
+│   ├── jmux            # Main jmux bash script
+│   ├── jmux-go         # Go version (recommended)
 │   └── jcat-binary     # Static jcat binary
 ├── src/                 # Source code
-│   └── jcat/           # jcat Go source
+│   ├── jcat/           # jcat Go source
+│   └── jmux-go/        # jmux Go implementation
 ├── scripts/             # Build and utility scripts
 ├── tests/               # Test scripts
 ├── docs/                # Documentation
@@ -35,25 +37,43 @@ jmux/
 ## Building
 
 ```bash
-# Build jcat binary
+# Build everything (Go version + jcat)
 make build
 
-# Or use the build script directly
-./scripts/build-jcat.sh
+# Build just the Go version
+make build-go
+
+# Build just jcat 
+make build-jcat
 
 # Clean build artifacts
 make clean
 ```
 
+## Versions
+
+**jmux-go (Recommended)** - Pure Go implementation:
+- ✅ **Built-in jcat** - No external dependencies
+- ✅ **Live monitoring** - Real-time message overlays  
+- ✅ **Static binary** - Single portable executable
+- ✅ **Better performance** - Native Go networking
+- ✅ **Rich CLI** - Modern command interface with help
+
+**jmux (Bash)** - Original shell script:
+- ✅ **Mature** - Stable and well-tested
+- ✅ **Flexible** - Easy to modify and extend
+- ⚠️ **Dependencies** - Requires socat/jcat binary
+
 ## Installation
 
 ```bash
-# Install to system
+# Install to system (installs Go version as default)
 make install
 
-# Or manually copy binaries
-sudo cp bin/jmux /usr/local/bin/
-sudo cp bin/jcat-binary /usr/local/bin/jcat
+# Manual installation
+sudo cp bin/jmux-go /usr/local/bin/jmux      # Go version (recommended)
+sudo cp bin/jmux /usr/local/bin/jmux-bash    # Bash version  
+sudo cp bin/jcat-binary /usr/local/bin/jcat  # jcat binary
 ```
 
 ## Quick Start
