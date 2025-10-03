@@ -60,7 +60,19 @@ func (m *Manager) StartRegularSessionWithMessaging() error {
 	color.Yellow("💡 Tip: Use 'dmux share' to make it shareable")
 	color.Blue("📱 Real-time messaging is active - messages will appear automatically")
 
-	// Start tmux in the background, don't replace the current process
+	// Get the current dmux binary path
+	dmuxPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get dmux executable path: %v", err)
+	}
+
+	// Start the messaging monitor as a background daemon
+	monitorCmd := exec.Command(dmuxPath, "_internal_messaging_monitor")
+	if err := monitorCmd.Start(); err != nil {
+		color.Yellow("Warning: Could not start messaging monitor: %v", err)
+	}
+
+	// Start tmux session
 	cmd := exec.Command("tmux", "new-session", "-d", "-s", "dmux-main")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create tmux session: %v", err)
@@ -76,7 +88,7 @@ func (m *Manager) StartRegularSessionWithMessaging() error {
 	attachCmd.Stdout = os.Stdout
 	attachCmd.Stderr = os.Stderr
 	
-	// This blocks until tmux exits, keeping messaging alive
+	// This blocks until tmux exits
 	return attachCmd.Run()
 }
 

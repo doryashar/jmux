@@ -145,12 +145,13 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 		fmt.Printf("[DEBUG] Processing message for user %s: %s\n", currentUser, msg.Data)
 	}
 
-	// Try multiple display methods
-	m.displayRealtimeMessage(msg)
-	
-	// Also try tmux display if we're in tmux
-	if os.Getenv("TMUX") != "" {
+	// Display message using appropriate method
+	// If in tmux or if tmux sessions exist, use tmux display
+	if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
 		m.displayTmuxMessage(msg)
+	} else {
+		// Only show terminal overlay if in interactive terminal
+		m.displayRealtimeMessage(msg)
 	}
 
 	// Auto-remove old message after some time
@@ -311,17 +312,36 @@ func (m *Messaging) displayTmuxMessage(msg *Message) {
 	var tmuxMsg string
 	switch msg.Type {
 	case MessageTypeInvite:
-		tmuxMsg = fmt.Sprintf("INVITE from %s: Join session '%s' | dmux join %s", msg.From, msg.Data, msg.From)
+		tmuxMsg = fmt.Sprintf("📨 INVITE from %s: Join session '%s' | dmux join %s", msg.From, msg.Data, msg.From)
 	case MessageTypeUrgent:
-		tmuxMsg = fmt.Sprintf("URGENT from %s: %s", msg.From, msg.Data)
+		tmuxMsg = fmt.Sprintf("🚨 URGENT from %s: %s", msg.From, msg.Data)
 	default:
-		tmuxMsg = fmt.Sprintf("Message from %s: %s", msg.From, msg.Data)
+		tmuxMsg = fmt.Sprintf("💬 Message from %s: %s", msg.From, msg.Data)
 	}
 
-	// Use tmux display-message to show the notification
-	cmd := exec.Command("tmux", "display-message", "-d", "5000", tmuxMsg)
-	if err := cmd.Run(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
-		fmt.Printf("[DEBUG] Failed to display tmux message: %v\n", err)
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Displaying tmux message: %s\n", tmuxMsg)
+	}
+
+	// Try multiple tmux session targets to ensure message displays
+	sessionTargets := []string{"dmux-main", ""} // Try specific session first, then current
+	
+	for _, target := range sessionTargets {
+		var cmd *exec.Cmd
+		if target != "" {
+			cmd = exec.Command("tmux", "display-message", "-t", target, "-d", "5000", tmuxMsg)
+		} else {
+			cmd = exec.Command("tmux", "display-message", "-d", "5000", tmuxMsg)
+		}
+		
+		if err := cmd.Run(); err == nil {
+			if os.Getenv("DMUX_DEBUG") != "" {
+				fmt.Printf("[DEBUG] Successfully displayed message to target: %s\n", target)
+			}
+			return // Success
+		} else if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Failed to display tmux message to target '%s': %v\n", target, err)
+		}
 	}
 }
 
@@ -332,6 +352,13 @@ func isInteractiveTerminal() bool {
 		return false
 	}
 	return (fileInfo.Mode() & fs.ModeCharDevice) != 0
+}
+
+// hasTmuxSessions checks if there are any active tmux sessions
+func (m *Messaging) hasTmuxSessions() bool {
+	cmd := exec.Command("tmux", "list-sessions")
+	err := cmd.Run()
+	return err == nil
 }
 
 // CleanupOldMessages removes old message files
