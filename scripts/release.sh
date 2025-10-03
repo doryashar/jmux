@@ -99,7 +99,7 @@ cd "$SRC_DIR"
 mkdir -p "$BIN_DIR"
 
 # Build with release flags
-CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -tags netgo -installsuffix netgo -o "$BIN_DIR/jmux-go" .
+CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -tags netgo -installsuffix netgo -o "$BIN_DIR/dmux" .
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Build failed${NC}"
@@ -110,9 +110,9 @@ echo -e "${GREEN}✅ Build successful${NC}"
 
 # Show binary info
 echo -e "${BLUE}📦 Binary information:${NC}"
-ls -lh "$BIN_DIR/jmux-go"
-file "$BIN_DIR/jmux-go"
-"$BIN_DIR/jmux-go" version --verbose
+ls -lh "$BIN_DIR/dmux"
+file "$BIN_DIR/dmux"
+"$BIN_DIR/dmux" version --verbose
 
 echo -e "${BLUE}📤 Committing release version...${NC}"
 
