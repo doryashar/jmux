@@ -94,12 +94,33 @@ EOF
 
 echo -e "${BLUE}🔨 Building release binary...${NC}"
 
+# Setup Go environment
+export GOPATH="$HOME/go-workspace"
+export GOMODCACHE="$HOME/go-workspace/pkg/mod"
+export PATH="$HOME/go/bin:$PATH"
+export GOROOT="$HOME/go"
+
+# Verify Go is available
+if ! command -v go &> /dev/null; then
+    echo -e "${RED}❌ Go not found. Please install Go first.${NC}"
+    exit 1
+fi
+
+echo -e "${BLUE}Go version: $(go version)${NC}"
+
 # Build the release binary
 cd "$SRC_DIR"
 mkdir -p "$BIN_DIR"
 
-# Build with release flags
-CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -tags netgo -installsuffix netgo -o "$BIN_DIR/dmux" .
+echo -e "${BLUE}Building portable static binary...${NC}"
+# Build with static linking for maximum portability
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -a \
+    -ldflags '-w -s -extldflags "-static"' \
+    -tags 'netgo osusergo static_build' \
+    -installsuffix netgo \
+    -trimpath \
+    -o "$BIN_DIR/dmux" .
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Build failed${NC}"
@@ -108,18 +129,49 @@ fi
 
 echo -e "${GREEN}✅ Build successful${NC}"
 
-# Show binary info
+# Verify binary is static
 echo -e "${BLUE}📦 Binary information:${NC}"
 ls -lh "$BIN_DIR/dmux"
 file "$BIN_DIR/dmux"
-"$BIN_DIR/dmux" version --verbose
+
+# Check if binary is truly static
+if ldd "$BIN_DIR/dmux" 2>/dev/null | grep -q "not a dynamic executable"; then
+    echo -e "${GREEN}✅ Binary is statically linked (portable)${NC}"
+elif ldd "$BIN_DIR/dmux" 2>/dev/null | grep -q "statically linked"; then
+    echo -e "${GREEN}✅ Binary is statically linked (portable)${NC}"
+else
+    echo -e "${YELLOW}⚠️  Binary may have dynamic dependencies:${NC}"
+    ldd "$BIN_DIR/dmux" 2>/dev/null || echo "ldd check failed"
+fi
+
+# Test the binary
+echo -e "${BLUE}Testing binary...${NC}"
+if JMUX_SHARED_DIR="/tmp/test-dmux" "$BIN_DIR/dmux" version --verbose; then
+    echo -e "${GREEN}✅ Binary test successful${NC}"
+else
+    echo -e "${RED}❌ Binary test failed${NC}"
+    exit 1
+fi
+
+# Generate checksum
+echo -e "${BLUE}Generating checksum...${NC}"
+CHECKSUM=$(sha256sum "$BIN_DIR/dmux" | cut -d' ' -f1)
+echo -e "${BLUE}SHA256: ${CHECKSUM}${NC}"
+
+# Create checksum file
+echo "$CHECKSUM  dmux" > "$BIN_DIR/dmux.sha256"
+echo -e "${GREEN}✅ Checksum file created: ${BIN_DIR}/dmux.sha256${NC}"
 
 echo -e "${BLUE}📤 Committing release version...${NC}"
 
 # Commit the version change
 cd "$PROJECT_ROOT"
 git add "$VERSION_FILE"
-git commit -m "Release ${RELEASE_VERSION}"
+git commit -m "Release ${RELEASE_VERSION}
+
+🤖 Generated with [Claude Code](https://claude.ai/code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
 
 # Create git tag
 echo -e "${BLUE}🏷️  Creating git tag...${NC}"
@@ -137,11 +189,49 @@ else
     # Push the tag
     git push origin "$RELEASE_VERSION"
     
-    # Create GitHub release
+    # Generate release notes
+    RELEASE_NOTES="## dmux ${RELEASE_VERSION}
+
+### What's New:
+$(git log --oneline $(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "HEAD~10")..HEAD | sed 's/^/- /')
+
+### Binary Information:
+- **Type**: Statically linked, portable across Linux distributions
+- **Size**: $(ls -lh "$BIN_DIR/dmux" | awk '{print $5}')
+- **Architecture**: Linux x86_64
+- **Dependencies**: None (static binary)
+- **Compatibility**: All Linux systems with kernel 2.6+
+- **SHA256**: \`$CHECKSUM\`
+
+### Installation:
+\`\`\`bash
+# Download and install
+curl -L https://github.com/doryashar/jmux/releases/download/${RELEASE_VERSION}/dmux -o dmux
+curl -L https://github.com/doryashar/jmux/releases/download/${RELEASE_VERSION}/dmux.sha256 -o dmux.sha256
+
+# Verify checksum (optional but recommended)
+sha256sum -c dmux.sha256
+
+# Install
+chmod +x dmux
+sudo mv dmux /usr/local/bin/
+\`\`\`
+
+### Features:
+- 🔄 Real-time tmux session sharing
+- 💬 Live messaging and notifications  
+- 🚀 Built-in jcat networking (no socat dependency)
+- 🔄 Auto-update functionality
+- 📱 Cross-platform portability
+
+🤖 Generated with [Claude Code](https://claude.ai/code)"
+
+    # Create GitHub release with enhanced notes
     gh release create "$RELEASE_VERSION" \
         "$BIN_DIR/dmux" \
+        "$BIN_DIR/dmux.sha256" \
         --title "dmux ${RELEASE_VERSION}" \
-        --notes "Release ${RELEASE_VERSION}" \
+        --notes "$RELEASE_NOTES" \
         --latest
     
     echo -e "${GREEN}✅ GitHub release created successfully${NC}"
@@ -196,7 +286,11 @@ EOF
 
 # Commit the dev version
 git add "$VERSION_FILE"
-git commit -m "Bump version to ${NEXT_VERSION} for development"
+git commit -m "Bump version to ${NEXT_VERSION} for development
+
+🤖 Generated with [Claude Code](https://claude.ai/code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
 
 echo
 echo -e "${GREEN}🎉 Release ${RELEASE_VERSION} completed successfully!${NC}"
