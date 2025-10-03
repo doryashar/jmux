@@ -70,6 +70,16 @@ func (mm *MonitorManager) StartMonitor() error {
 		return fmt.Errorf("failed to get dmux executable path: %v", err)
 	}
 	
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Executable path: %s\n", dmuxPath)
+		// Check if the path is executable
+		if info, err := os.Stat(dmuxPath); err != nil {
+			fmt.Printf("[DEBUG] Stat error: %v\n", err)
+		} else {
+			fmt.Printf("[DEBUG] File mode: %v\n", info.Mode())
+		}
+	}
+	
 	// Prepare environment for the monitor process
 	env := os.Environ()
 	// Ensure critical environment variables are passed
@@ -82,15 +92,38 @@ func (mm *MonitorManager) StartMonitor() error {
 		env = append(env, "DMUX_DEBUG=1")
 	}
 	
-	// Start the monitor process
+	// Start the monitor process as a daemon with proper detachment
 	cmd := exec.Command(dmuxPath, "_internal_messaging_monitor")
 	cmd.Env = env
 	
+	// Set up process attributes for daemon behavior
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true, // Create new session (detach from controlling terminal)
+	}
+	
+	// Detach from parent process - redirect stdout/stderr to /dev/null unless debugging
 	if os.Getenv("DMUX_DEBUG") != "" {
-		fmt.Printf("[DEBUG] Starting messaging monitor: %s _internal_messaging_monitor\n", dmuxPath)
+		// Keep output visible for debugging
+		fmt.Printf("[DEBUG] Starting messaging monitor as daemon: %s _internal_messaging_monitor\n", dmuxPath)
+		fmt.Printf("[DEBUG] Command: %v\n", cmd.Args)
+		fmt.Printf("[DEBUG] Environment variables count: %d\n", len(env))
+	} else {
+		// Redirect output to /dev/null for clean daemon behavior
+		devNull, err := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+		if err == nil {
+			cmd.Stdout = devNull
+			cmd.Stderr = devNull
+			cmd.Stdin = devNull
+			defer devNull.Close()
+		}
 	}
 	
 	if err := cmd.Start(); err != nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Start error: %v\n", err)
+			fmt.Printf("[DEBUG] Command path: %s\n", cmd.Path)
+			fmt.Printf("[DEBUG] Command args: %v\n", cmd.Args)
+		}
 		return fmt.Errorf("failed to start monitor: %v", err)
 	}
 	

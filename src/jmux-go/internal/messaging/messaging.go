@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -58,57 +59,151 @@ func NewMessaging(cfg *config.Config) *Messaging {
 	}
 }
 
-// StartLiveMonitoring starts the live message monitoring
+// StartLiveMonitoring starts the live message monitoring using tail-based approach
 func (m *Messaging) StartLiveMonitoring() error {
 	if !m.config.RealtimeEnabled {
 		return nil
 	}
 
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		if m.logger != nil {
+			m.logger.Error("No USER environment variable")
+		}
+		return fmt.Errorf("unable to determine current user")
 	}
-	m.watcher = watcher
 
-	// Watch the messages directory
-	err = watcher.Add(m.config.MessagesDir)
-	if err != nil {
-		return err
+	// Create user-specific message file path
+	userMessageFile := filepath.Join(m.config.MessagesDir, currentUser+".messages")
+	
+	// Ensure the message file exists with proper permissions
+	if _, err := os.Stat(userMessageFile); os.IsNotExist(err) {
+		// Create file with 666 permissions to allow shared access
+		file, err := os.OpenFile(userMessageFile, os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to create user message file: %v", err)
+			}
+			return fmt.Errorf("failed to create user message file: %v", err)
+		}
+		file.Close()
+		
+		// Explicitly set permissions for shared directory scenarios
+		if err := os.Chmod(userMessageFile, 0666); err != nil {
+			if m.logger != nil {
+				m.logger.Debug("Could not set file permissions for %s: %v", userMessageFile, err)
+			}
+		}
+		
+		if m.logger != nil {
+			m.logger.Info("Created user message file with shared permissions: %s", userMessageFile)
+		}
 	}
 
 	// Log that monitoring started
 	if m.logger != nil {
-		m.logger.Info("Live monitoring started for: %s", m.config.MessagesDir)
+		m.logger.Info("Live monitoring started for user %s, file: %s", currentUser, userMessageFile)
 	}
 
-	go func() {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if event.Op&fsnotify.Create == fsnotify.Create {
-					// New message file created
-					if strings.HasSuffix(event.Name, ".msg") {
-						if m.logger != nil {
-							m.logger.Debug("New message file detected: %s", event.Name)
-						}
-						m.handleNewMessage(event.Name)
-					}
-				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
+	// Start tail-based monitoring
+	go m.tailUserMessages(userMessageFile)
+
+	return nil
+}
+
+// tailUserMessages monitors a user's message file using tail-like approach
+func (m *Messaging) tailUserMessages(userMessageFile string) {
+	if m.logger != nil {
+		m.logger.Debug("Starting tail monitoring for: %s", userMessageFile)
+	}
+
+	// Get initial file position
+	lastSize := int64(0)
+	if stat, err := os.Stat(userMessageFile); err == nil {
+		lastSize = stat.Size()
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond) // Poll every 500ms
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := m.checkForNewMessages(userMessageFile, &lastSize); err != nil {
 				if m.logger != nil {
-					m.logger.Error("Watcher error: %v", err)
+					m.logger.Debug("Error checking for new messages: %v", err)
 				}
-			case <-m.done:
-				return
+			}
+		case <-m.done:
+			if m.logger != nil {
+				m.logger.Debug("Tail monitoring stopped")
+			}
+			return
+		}
+	}
+}
+
+// checkForNewMessages checks if the file has new messages and processes them
+func (m *Messaging) checkForNewMessages(userMessageFile string, lastSize *int64) error {
+	stat, err := os.Stat(userMessageFile)
+	if err != nil {
+		return err
+	}
+
+	currentSize := stat.Size()
+	if currentSize <= *lastSize {
+		return nil // No new content
+	}
+
+	// Read all messages from the file
+	file, err := os.Open(userMessageFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var messages []Message
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			var msg Message
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				if m.logger != nil {
+					m.logger.Debug("Error parsing message JSON: %v", err)
+				}
+				continue // Skip malformed lines
+			}
+			messages = append(messages, msg)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	// Display all messages found
+	for _, msg := range messages {
+		if err := m.handleNewMessageLine(msg); err != nil {
+			if m.logger != nil {
+				m.logger.Debug("Error processing message: %v", err)
 			}
 		}
-	}()
+	}
+
+	// Clear the file after processing all messages (monitor consumes them)
+	if len(messages) > 0 {
+		if err := os.Truncate(userMessageFile, 0); err != nil {
+			if m.logger != nil {
+				m.logger.Debug("Could not clear message file after processing: %v", err)
+			}
+		} else {
+			if m.logger != nil {
+				m.logger.Info("Cleared %d processed messages from file", len(messages))
+			}
+			*lastSize = 0 // Reset size tracking after clearing
+		}
+	}
 
 	return nil
 }
@@ -119,9 +214,11 @@ func (m *Messaging) StopLiveMonitoring() {
 		m.logger.LogMonitorStop()
 	}
 	
-	if m.watcher != nil {
-		m.done <- true
-		m.watcher.Close()
+	if m.done != nil {
+		select {
+		case m.done <- true:
+		default:
+		}
 	}
 	
 	// Close logger
@@ -130,7 +227,50 @@ func (m *Messaging) StopLiveMonitoring() {
 	}
 }
 
-// handleNewMessage processes a new message file
+// handleNewMessageLine processes a message struct
+func (m *Messaging) handleNewMessageLine(msg Message) error {
+	if m.logger != nil {
+		m.logger.LogMessageProcessed(msg.From, string(msg.Type), msg.Data)
+	}
+
+	// Display message using configured method
+	switch m.config.MessageDisplayMethod {
+	case "kdialog":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("kdialog")
+		}
+		m.displayKDialogMessage(&msg)
+	case "notify":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("notify-send")
+		}
+		m.displayNotifyMessage(&msg)
+	case "tmux":
+		if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
+			if m.logger != nil {
+				m.logger.LogDisplayMethod("tmux")
+			}
+			m.displayTmuxMessage(&msg)
+		} else {
+			// Fallback to auto-detect
+			m.displayAutoMessage(&msg)
+		}
+	case "terminal":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("terminal")
+		}
+		m.displayRealtimeMessage(&msg)
+	case "auto":
+		m.displayAutoMessage(&msg)
+	default:
+		// Default to auto-detect
+		m.displayAutoMessage(&msg)
+	}
+
+	return nil
+}
+
+// handleNewMessage processes a new message file (legacy method for compatibility)
 func (m *Messaging) handleNewMessage(msgFile string) {
 	// Small delay to ensure file is fully written
 	time.Sleep(100 * time.Millisecond)
@@ -243,41 +383,97 @@ func (m *Messaging) displayRealtimeMessage(msg *Message) {
 	}()
 }
 
-// SendMessage sends a message to a user
+// SendMessage sends a message to a user by appending to their message file
 func (m *Messaging) SendMessage(toUser string, msgType MessageType, data string) error {
 	timestamp := time.Now().Unix()
-	fileName := fmt.Sprintf("%s_%d.msg", toUser, timestamp)
-	filePath := filepath.Join(m.config.MessagesDir, fileName)
+	userMessageFile := filepath.Join(m.config.MessagesDir, toUser+".messages")
 
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
 		currentUser = "unknown"
 	}
 
-	content := fmt.Sprintf(`FROM=%s
-TYPE=%s
-TIMESTAMP=%d
-DATA=%s
-PRIORITY=normal
-`, currentUser, msgType, timestamp, data)
+	// Create JSON-like message format for easier parsing
+	messageLine := fmt.Sprintf("{\"from\":\"%s\",\"type\":\"%s\",\"timestamp\":%d,\"data\":\"%s\",\"priority\":\"normal\"}\n", 
+		currentUser, msgType, timestamp, strings.ReplaceAll(data, "\"", "\\\""))
 
-	return os.WriteFile(filePath, []byte(content), 0644)
+	// Ensure message file exists with proper permissions before writing
+	if _, err := os.Stat(userMessageFile); os.IsNotExist(err) {
+		// Create file with 666 permissions for shared access
+		if file, err := os.OpenFile(userMessageFile, os.O_CREATE|os.O_WRONLY, 0666); err != nil {
+			return fmt.Errorf("failed to create user message file: %v", err)
+		} else {
+			file.Close()
+			// Explicitly set permissions
+			os.Chmod(userMessageFile, 0666)
+			if m.logger != nil {
+				m.logger.Info("Created user message file for %s with shared permissions", toUser)
+			}
+		}
+	}
+
+	// Append message to user's message file
+	file, err := os.OpenFile(userMessageFile, os.O_APPEND|os.O_WRONLY, 0666)
+	if err != nil {
+		return fmt.Errorf("failed to open user message file: %v", err)
+	}
+	defer file.Close()
+
+	// Ensure permissions are correct (in case file already existed)
+	if err := os.Chmod(userMessageFile, 0666); err != nil {
+		if m.logger != nil {
+			m.logger.Debug("Could not set file permissions for %s: %v", userMessageFile, err)
+		}
+	}
+
+	// Write the message
+	if _, err := file.WriteString(messageLine); err != nil {
+		return fmt.Errorf("failed to write message: %v", err)
+	}
+
+	if m.logger != nil {
+		m.logger.Info("Message sent to %s: %s", toUser, data)
+	}
+
+	return nil
 }
 
-// ReadMessages reads and displays messages for current user
+// ReadMessages reads and displays messages for current user from their message file
 func (m *Messaging) ReadMessages() error {
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
 		return fmt.Errorf("unable to determine current user")
 	}
 
-	pattern := currentUser + "_*.msg"
-	matches, err := filepath.Glob(filepath.Join(m.config.MessagesDir, pattern))
-	if err != nil {
-		return err
+	userMessageFile := filepath.Join(m.config.MessagesDir, currentUser+".messages")
+	
+	// Check if user message file exists
+	if _, err := os.Stat(userMessageFile); os.IsNotExist(err) {
+		color.Yellow("No new messages")
+		return nil
 	}
 
-	if len(matches) == 0 {
+	// Read all messages from the file
+	file, err := os.Open(userMessageFile)
+	if err != nil {
+		return fmt.Errorf("failed to open user message file: %v", err)
+	}
+	defer file.Close()
+
+	var messages []Message
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			var msg Message
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				continue // Skip malformed lines
+			}
+			messages = append(messages, msg)
+		}
+	}
+
+	if len(messages) == 0 {
 		color.Yellow("No new messages")
 		return nil
 	}
@@ -286,12 +482,7 @@ func (m *Messaging) ReadMessages() error {
 	color.Green("New Messages")
 	color.Blue("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	for _, msgFile := range matches {
-		msg, err := m.readMessageFile(msgFile)
-		if err != nil {
-			continue
-		}
-
+	for _, msg := range messages {
 		fmt.Printf("\n")
 		switch msg.Type {
 		case MessageTypeInvite:
@@ -306,12 +497,15 @@ func (m *Messaging) ReadMessages() error {
 			color.Cyan("From: %s", msg.From)
 			fmt.Printf("  %s\n", msg.Data)
 		}
-
-		// Remove the message after reading
-		os.Remove(msgFile)
 	}
 
 	fmt.Println()
+
+	// Clear messages by truncating the file
+	if err := os.Truncate(userMessageFile, 0); err != nil {
+		return fmt.Errorf("failed to clear messages: %v", err)
+	}
+
 	return nil
 }
 
@@ -439,8 +633,44 @@ func (m *Messaging) displayKDialogMessage(msg *Message) {
 		fmt.Printf("[DEBUG] Displaying kdialog message: %s\n", text)
 	}
 
+	// Build kdialog command with focus and attention options
+	args := []string{
+		dialogType, text,
+		"--title", title,
+		"--icon", "mail-message",
+	}
+	
+	// Add window attachment for focus - use WINDOWID if available, otherwise attach to root
+	if windowID := os.Getenv("WINDOWID"); windowID != "" {
+		args = append(args, "--attach", windowID)
+	} else {
+		args = append(args, "--attach", "0") // Attach to root window
+	}
+	
+	// Add urgency-specific options
+	switch msg.Type {
+	case MessageTypeUrgent:
+		// For urgent messages, use error dialog type which is more attention-grabbing
+		args[0] = "--error"
+		args = append(args, 
+			"--geometry", "400x200+100+100", // Position prominently
+			"--dontagain", "dmux-urgent-msg") // Prevent spam for urgent messages
+	case MessageTypeInvite:
+		// For invites, use question dialog with buttons for better interaction
+		args[0] = "--yesno"
+		args[1] = text + "\n\nOpen terminal to join?"
+		args = append(args, "--geometry", "450x250+100+100")
+	default:
+		// Regular messages get standard positioning
+		args = append(args, "--geometry", "400x150+100+100")
+	}
+	
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Displaying kdialog with args: %v\n", args)
+	}
+
 	// Display the dialog
-	cmd := exec.Command("kdialog", dialogType, text, "--title", title, "--icon", "mail-message")
+	cmd := exec.Command("kdialog", args...)
 	
 	// Run kdialog in background so it doesn't block
 	go func() {

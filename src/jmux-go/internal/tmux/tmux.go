@@ -132,15 +132,26 @@ func (m *Manager) ListSessions() error {
 	color.Blue("📋 Tmux sessions (dmux-enhanced):")
 	
 	cmd := exec.Command("tmux", "list-sessions")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	output, err := cmd.CombinedOutput()
 	
-	err := cmd.Run()
+	if err != nil {
+		// Check if it's the "no server running" case
+		if strings.Contains(string(output), "no server running") {
+			color.Yellow("No tmux sessions currently running")
+			color.Blue("💡 Start a new session with: dmux new [session-name]")
+		} else {
+			// Some other error occurred
+			fmt.Print(string(output))
+		}
+	} else {
+		// Success - print the session list
+		fmt.Print(string(output))
+	}
 	
 	fmt.Println()
 	color.Blue("💡 Tip: Use 'dmux sessions' to see shared sessions")
 	
-	return err
+	return nil // Always return nil - we handle errors gracefully
 }
 
 // KillSession kills a tmux session

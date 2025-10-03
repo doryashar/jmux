@@ -4,3 +4,7 @@
 ## Build Considerations
 - Always build a static portable version to avoid library compatibility issues (e.g., GLIBC version mismatches)
 - Ensure the binary can run on different Linux distributions without dependency problems
+- Always build dmux portable (static)
+
+## Project Structure
+- Always keep tests in tests directory

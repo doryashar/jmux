@@ -10,11 +10,7 @@ var lsCmd = &cobra.Command{
 	Short: "List tmux sessions (enhanced)",
 	Long:  `List tmux sessions with dmux enhancements and tips.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		err := tmuxMgr.ListSessions()
-		if err != nil {
-			cmd.Printf("Error listing sessions: %v\n", err)
-			return
-		}
+		tmuxMgr.ListSessions()
 	},
 }
 

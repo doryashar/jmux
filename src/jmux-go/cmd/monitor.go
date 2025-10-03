@@ -7,6 +7,8 @@ import (
 	
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"jmux/internal/config"
+	"jmux/internal/messaging"
 )
 
 // monitorCmd represents the monitor command
@@ -22,6 +24,7 @@ var monitorStatusCmd = &cobra.Command{
 	Short: "Show monitor status",
 	Long:  `Show the status of the messaging monitor daemon.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ensureMonitorManager()
 		status := monitorMgr.GetMonitorStatus()
 		color.Blue("Messaging Monitor Status: %s", status)
 		
@@ -40,6 +43,7 @@ var monitorStartCmd = &cobra.Command{
 	Short: "Start monitor",
 	Long:  `Start the messaging monitor daemon.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ensureMonitorManager()
 		if monitorMgr.IsMonitorRunning() {
 			color.Yellow("Monitor is already running")
 			return
@@ -60,6 +64,7 @@ var monitorStopCmd = &cobra.Command{
 	Short: "Stop monitor",
 	Long:  `Stop the messaging monitor daemon.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ensureMonitorManager()
 		if !monitorMgr.IsMonitorRunning() {
 			color.Yellow("Monitor is not running")
 			return
@@ -80,6 +85,7 @@ var monitorRestartCmd = &cobra.Command{
 	Short: "Restart monitor",
 	Long:  `Restart the messaging monitor daemon.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ensureMonitorManager()
 		color.Blue("Restarting messaging monitor...")
 		
 		if err := monitorMgr.RestartMonitor(); err != nil {
@@ -91,12 +97,21 @@ var monitorRestartCmd = &cobra.Command{
 	},
 }
 
+// ensureMonitorManager creates a minimal monitor manager for monitor commands
+func ensureMonitorManager() {
+	if monitorMgr == nil {
+		cfg = config.DefaultConfig()
+		monitorMgr = messaging.NewMonitorManager(cfg)
+	}
+}
+
 // monitorLogsCmd shows monitor logs
 var monitorLogsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Show monitor logs",
 	Long:  `Display the messaging monitor log file.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ensureMonitorManager()
 		logFile := cfg.MonitorLogFile
 		
 		// Check if log file exists

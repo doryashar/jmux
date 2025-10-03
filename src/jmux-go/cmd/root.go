@@ -39,7 +39,9 @@ Features:
 		// Skip initialization for commands that don't need the full system
 		skipInit := cmd.Name() == "help" || 
 				   cmd.Name() == "completion" || 
-				   cmd.Name() == "version"
+				   cmd.Name() == "version" ||
+				   cmd.Name() == "monitor" ||  // Skip for monitor command itself
+				   (cmd.Parent() != nil && cmd.Parent().Name() == "monitor") // Skip for monitor subcommands
 		
 		// Also skip if --version flag is set on root command
 		if versionFlag, _ := cmd.Flags().GetBool("version"); versionFlag {
@@ -95,8 +97,8 @@ func initializeSystem() {
 	// Initialize monitor manager
 	monitorMgr = messaging.NewMonitorManager(cfg)
 	
-	// Start centralized monitor if realtime is enabled
-	if cfg.RealtimeEnabled {
+	// Start centralized monitor if realtime is enabled and monitor not already running
+	if cfg.RealtimeEnabled && !monitorMgr.IsMonitorRunning() {
 		if err := monitorMgr.StartMonitor(); err != nil {
 			color.Yellow("Warning: Could not start messaging monitor: %v", err)
 		}
