@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	cfg       *config.Config
-	msgSystem *messaging.Messaging
-	sessMgr   *session.Manager
-	tmuxMgr   *tmux.Manager
+	cfg        *config.Config
+	msgSystem  *messaging.Messaging
+	monitorMgr *messaging.MonitorManager
+	sessMgr    *session.Manager
+	tmuxMgr    *tmux.Manager
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -73,9 +74,14 @@ func initializeSystem() {
 	// Initialize messaging system
 	msgSystem = messaging.NewMessaging(cfg)
 	
-	// Start live monitoring in background
-	if err := msgSystem.StartLiveMonitoring(); err != nil {
-		color.Yellow("Warning: Could not start live monitoring: %v", err)
+	// Initialize monitor manager
+	monitorMgr = messaging.NewMonitorManager(cfg)
+	
+	// Start centralized monitor if realtime is enabled
+	if cfg.RealtimeEnabled {
+		if err := monitorMgr.StartMonitor(); err != nil {
+			color.Yellow("Warning: Could not start messaging monitor: %v", err)
+		}
 	}
 
 	// Initialize managers

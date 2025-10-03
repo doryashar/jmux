@@ -19,6 +19,8 @@ type Config struct {
 	RealtimeEnabled        bool
 	NotificationDuration   int
 	WatcherPIDFile         string
+	MonitorPIDFile         string
+	MessageDisplayMethod   string // "kdialog", "terminal", "tmux"
 }
 
 // DefaultConfig returns the default configuration
@@ -40,6 +42,8 @@ func DefaultConfig() *Config {
 		RealtimeEnabled:        getEnvOrDefaultBool("JMUX_REALTIME", true),
 		NotificationDuration:   getEnvOrDefaultInt("JMUX_NOTIFICATION_DURATION", 5),
 		WatcherPIDFile:         filepath.Join(configDir, "watcher.pid"),
+		MonitorPIDFile:         filepath.Join("/tmp", "dmux-monitor-"+os.Getenv("USER")+".pid"),
+		MessageDisplayMethod:   getEnvOrDefault("DMUX_MESSAGE_DISPLAY", "auto"),
 	}
 }
 

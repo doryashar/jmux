@@ -145,13 +145,26 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 		fmt.Printf("[DEBUG] Processing message for user %s: %s\n", currentUser, msg.Data)
 	}
 
-	// Display message using appropriate method
-	// If in tmux or if tmux sessions exist, use tmux display
-	if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
-		m.displayTmuxMessage(msg)
-	} else {
-		// Only show terminal overlay if in interactive terminal
+	// Display message using configured method
+	switch m.config.MessageDisplayMethod {
+	case "kdialog":
+		m.displayKDialogMessage(msg)
+	case "notify":
+		m.displayNotifyMessage(msg)
+	case "tmux":
+		if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
+			m.displayTmuxMessage(msg)
+		} else {
+			// Fallback to auto-detect
+			m.displayAutoMessage(msg)
+		}
+	case "terminal":
 		m.displayRealtimeMessage(msg)
+	case "auto":
+		m.displayAutoMessage(msg)
+	default:
+		// Default to auto-detect
+		m.displayAutoMessage(msg)
 	}
 
 	// Auto-remove old message after some time
@@ -359,6 +372,132 @@ func (m *Messaging) hasTmuxSessions() bool {
 	cmd := exec.Command("tmux", "list-sessions")
 	err := cmd.Run()
 	return err == nil
+}
+
+// displayKDialogMessage shows the message using kdialog
+func (m *Messaging) displayKDialogMessage(msg *Message) {
+	// Check if kdialog is available
+	if _, err := exec.LookPath("kdialog"); err != nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] kdialog not found, falling back to terminal display\n")
+		}
+		m.displayRealtimeMessage(msg)
+		return
+	}
+
+	var title, text string
+	var dialogType string = "--msgbox"
+	
+	switch msg.Type {
+	case MessageTypeInvite:
+		title = "dmux - Session Invitation"
+		text = fmt.Sprintf("📨 Invitation from %s\n\nJoin session: %s\n\nTo join, run:\ndmux join %s", msg.From, msg.Data, msg.From)
+		dialogType = "--msgbox"
+	case MessageTypeUrgent:
+		title = "dmux - Urgent Message"
+		text = fmt.Sprintf("🚨 URGENT from %s\n\n%s", msg.From, msg.Data)
+		dialogType = "--msgbox"
+	default:
+		title = "dmux - Message"
+		text = fmt.Sprintf("💬 Message from %s\n\n%s", msg.From, msg.Data)
+		dialogType = "--msgbox"
+	}
+
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Displaying kdialog message: %s\n", text)
+	}
+
+	// Display the dialog
+	cmd := exec.Command("kdialog", dialogType, text, "--title", title, "--icon", "mail-message")
+	
+	// Run kdialog in background so it doesn't block
+	go func() {
+		if err := cmd.Run(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Failed to display kdialog message: %v\n", err)
+		}
+	}()
+}
+
+// displayNotifyMessage shows the message using notify-send
+func (m *Messaging) displayNotifyMessage(msg *Message) {
+	// Check if notify-send is available
+	if _, err := exec.LookPath("notify-send"); err != nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] notify-send not found, falling back to terminal display\n")
+		}
+		m.displayRealtimeMessage(msg)
+		return
+	}
+
+	var title, text, urgency string
+	
+	switch msg.Type {
+	case MessageTypeInvite:
+		title = "dmux - Session Invitation"
+		text = fmt.Sprintf("📨 Invitation from %s\nJoin session: %s\nRun: dmux join %s", msg.From, msg.Data, msg.From)
+		urgency = "normal"
+	case MessageTypeUrgent:
+		title = "dmux - Urgent Message"
+		text = fmt.Sprintf("🚨 URGENT from %s\n%s", msg.From, msg.Data)
+		urgency = "critical"
+	default:
+		title = "dmux - Message"
+		text = fmt.Sprintf("💬 Message from %s\n%s", msg.From, msg.Data)
+		urgency = "normal"
+	}
+
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Displaying notify-send message: %s\n", text)
+	}
+
+	// Display the notification
+	cmd := exec.Command("notify-send", "-u", urgency, "-t", "5000", "-i", "mail-message", title, text)
+	
+	// Run notify-send in background so it doesn't block
+	go func() {
+		if err := cmd.Run(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Failed to display notify-send message: %v\n", err)
+		}
+	}()
+}
+
+// displayAutoMessage automatically chooses the best display method
+func (m *Messaging) displayAutoMessage(msg *Message) {
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Auto-detecting best display method\n")
+	}
+
+	// Priority order: kdialog -> notify-send -> tmux -> terminal
+	if _, err := exec.LookPath("kdialog"); err == nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Using kdialog for display\n")
+		}
+		m.displayKDialogMessage(msg)
+		return
+	}
+	
+	if _, err := exec.LookPath("notify-send"); err == nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Using notify-send for display\n")
+		}
+		m.displayNotifyMessage(msg)
+		return
+	}
+	
+	// Check for tmux sessions
+	if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Using tmux for display\n")
+		}
+		m.displayTmuxMessage(msg)
+		return
+	}
+	
+	// Fallback to terminal
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Using terminal for display\n")
+	}
+	m.displayRealtimeMessage(msg)
 }
 
 // CleanupOldMessages removes old message files

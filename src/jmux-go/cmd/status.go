@@ -90,6 +90,17 @@ func showStatus() {
 		}
 	}
 
+	// Show monitor status
+	fmt.Println()
+	if monitorMgr != nil {
+		if monitorMgr.IsMonitorRunning() {
+			color.Green("✓ Messaging monitor is running")
+		} else {
+			color.Yellow("○ Messaging monitor is not running")
+			color.Blue("  💡 Start with: dmux monitor start")
+		}
+	}
+
 	fmt.Println()
 	color.Blue("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	color.Cyan("Commands:")

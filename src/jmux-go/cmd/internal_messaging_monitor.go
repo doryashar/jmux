@@ -18,6 +18,11 @@ var internalMessagingMonitorCmd = &cobra.Command{
 	Long:   `Internal command used to run messaging monitor inside tmux sessions. Not for direct use.`,
 	Hidden: true,
 	Run: func(cmd *cobra.Command, args []string) {
+		// This is the centralized messaging monitor daemon
+		if os.Getenv("DMUX_DEBUG") != "" {
+			color.Blue("Starting centralized messaging monitor daemon...")
+		}
+
 		// Initialize configuration
 		cfg := config.DefaultConfig()
 		
@@ -36,6 +41,10 @@ var internalMessagingMonitorCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		if os.Getenv("DMUX_DEBUG") != "" {
+			color.Green("Messaging monitor started successfully")
+		}
+
 		// Set up signal handling for graceful shutdown
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -43,8 +52,16 @@ var internalMessagingMonitorCmd = &cobra.Command{
 		// Wait for termination signal
 		<-sigChan
 		
+		if os.Getenv("DMUX_DEBUG") != "" {
+			color.Yellow("Shutting down messaging monitor...")
+		}
+		
 		// Stop monitoring
 		msgSystem.StopLiveMonitoring()
+		
+		if os.Getenv("DMUX_DEBUG") != "" {
+			color.Green("Messaging monitor stopped")
+		}
 	},
 }
 
