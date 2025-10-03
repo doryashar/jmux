@@ -115,12 +115,19 @@ func initializeSystem() {
 
 // startRegularSession starts a regular tmux session with messaging
 func startRegularSession() {
-	// If already in tmux, just continue running with messaging active
+	// If already in tmux, just show status and exit
 	if tmuxMgr.IsInTmuxSession() {
 		color.Yellow("Already in a tmux session with real-time messaging active")
 		color.Blue("💡 Messages will appear automatically")
-		// Keep the process alive to maintain messaging
-		select {} // Block forever to keep messaging active
+		
+		// Show monitor status
+		if monitorMgr != nil && monitorMgr.IsMonitorRunning() {
+			color.Green("✅ Messaging monitor is running")
+		} else {
+			color.Yellow("⚠️  Messaging monitor is not running")
+			color.Blue("   Start with: dmux monitor start")
+		}
+		return
 	}
 	
 	if err := tmuxMgr.StartRegularSessionWithMessaging(); err != nil {
