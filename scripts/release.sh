@@ -35,14 +35,24 @@ fi
 CURRENT_VERSION=$(grep 'Version.*=' "$VERSION_FILE" | sed 's/.*"\(.*\)".*/\1/')
 echo -e "${BLUE}Current version: ${CURRENT_VERSION}${NC}"
 
-# Check if current version is dev
-if [[ ! "$CURRENT_VERSION" == *"-dev" ]]; then
-    echo -e "${RED}❌ Current version is not a dev version. Expected format: vX.Y.Z-dev${NC}"
+# Determine release version
+if [[ "$CURRENT_VERSION" == *"-dev" ]]; then
+    # Extract version without -dev suffix
+    RELEASE_VERSION="${CURRENT_VERSION%-dev}"
+elif [[ "$CURRENT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    # Already a release version, ask for confirmation or increment
+    echo -e "${YELLOW}Current version is already a release version.${NC}"
+    read -p "$(echo -e "${YELLOW}Use current version ${CURRENT_VERSION} or specify new version (current/new): ${NC}")" VERSION_CHOICE
+    if [[ "$VERSION_CHOICE" == "new" ]]; then
+        read -p "$(echo -e "${YELLOW}Enter new version (e.g., v1.1.1): ${NC}")" RELEASE_VERSION
+    else
+        RELEASE_VERSION="$CURRENT_VERSION"
+    fi
+else
+    echo -e "${RED}❌ Invalid version format: ${CURRENT_VERSION}${NC}"
+    echo -e "${YELLOW}Expected format: vX.Y.Z or vX.Y.Z-dev${NC}"
     exit 1
 fi
-
-# Extract version without -dev suffix
-RELEASE_VERSION="${CURRENT_VERSION%-dev}"
 echo -e "${BLUE}Release version: ${RELEASE_VERSION}${NC}"
 
 # Prompt for confirmation
@@ -55,10 +65,14 @@ fi
 
 echo -e "${BLUE}📝 Updating version for release...${NC}"
 
-# Update version file for release (remove -dev)
+# Update version file for release
 BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 GIT_COMMIT=$(git rev-parse HEAD)
 
+# Backup original version file
+cp "$VERSION_FILE" "${VERSION_FILE}.backup"
+
+# Generate new version file with variable substitution
 cat > "$VERSION_FILE" << EOF
 package version
 
@@ -92,6 +106,14 @@ func IsDevVersion() bool {
 }
 EOF
 
+# Verify the generated file is valid Go
+if ! go fmt "$VERSION_FILE" >/dev/null 2>&1; then
+    echo -e "${RED}❌ Generated version file has syntax errors. Restoring backup...${NC}"
+    mv "${VERSION_FILE}.backup" "$VERSION_FILE"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ Version file updated successfully${NC}"
 echo -e "${BLUE}🔨 Building release binary...${NC}"
 
 # Setup Go environment
