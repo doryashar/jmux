@@ -258,7 +258,7 @@ func (m *Manager) ListSessions() error {
 			color.Green("  Public session")
 		}
 
-		color.Yellow("  To join: jmux join %s", session.User)
+		color.Yellow("  To join: dmux join %s", session.User)
 	}
 
 	fmt.Println()

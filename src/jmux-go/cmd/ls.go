@@ -8,7 +8,7 @@ import (
 var lsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List tmux sessions (enhanced)",
-	Long:  `List tmux sessions with jmux enhancements and tips.`,
+	Long:  `List tmux sessions with dmux enhancements and tips.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		err := tmuxMgr.ListSessions()
 		if err != nil {

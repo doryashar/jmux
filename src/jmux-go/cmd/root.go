@@ -10,6 +10,7 @@ import (
 	"jmux/internal/messaging"
 	"jmux/internal/session"
 	"jmux/internal/tmux"
+	"jmux/internal/updater"
 )
 
 var (
@@ -21,9 +22,9 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "jmux",
+	Use:   "dmux",
 	Short: "Tmux Session Sharing Made Easy",
-	Long: `jmux is an enhanced tmux session sharing tool with real-time messaging, 
+	Long: `dmux is an enhanced tmux session sharing tool with real-time messaging, 
 live monitoring, and built-in networking capabilities.
 
 Features:
@@ -83,11 +84,22 @@ func initializeSystem() {
 
 	// Register user in database
 	registerCurrentUser()
+
+	// Check for updates if needed (runs in background)
+	updater.CheckForUpdatesIfNeeded(cfg.ConfigDir)
 }
 
-// startRegularSession starts a regular tmux session
+// startRegularSession starts a regular tmux session with messaging
 func startRegularSession() {
-	if err := tmuxMgr.StartRegularSession(); err != nil {
+	// If already in tmux, just continue running with messaging active
+	if tmuxMgr.IsInTmuxSession() {
+		color.Yellow("Already in a tmux session with real-time messaging active")
+		color.Blue("💡 Messages will appear automatically")
+		// Keep the process alive to maintain messaging
+		select {} // Block forever to keep messaging active
+	}
+	
+	if err := tmuxMgr.StartRegularSessionWithMessaging(); err != nil {
 		color.Red("Error starting tmux session: %v", err)
 		os.Exit(1)
 	}

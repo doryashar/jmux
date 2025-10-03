@@ -17,7 +17,7 @@ var newCmd = &cobra.Command{
 		}
 
 		color.Blue("🆕 Creating new tmux session...")
-		color.Yellow("💡 Tip: Use 'jmux share' to make it shareable")
+		color.Yellow("💡 Tip: Use 'dmux share' to make it shareable")
 		
 		err := tmuxMgr.CreateSession(sessionName)
 		if err != nil {

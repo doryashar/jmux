@@ -324,5 +324,7 @@ This project is provided as-is for internal use.
 [ ]   use different version of socat to allow sigwitch? https://github.com/StalkR/misc/tree/master/pty
 [ ]   add "ask for share" that is doing reverse sharing
 [ ]   live monitor without inotify
-[ ]   every share should also show the share command the the host (if there are more than one, the session name is preferred to be shown)
+[ ]   every share should also show (print to the host/listener session) the share command that the client should run to connect (if there are more than one sessions, the session name is preferred to be shown)
       if not using a shared directory - you should display the full ip:port in your join command.
+[ ]   add request-for-share command which will start a reverse port listen so that if a client connects to that port, the client will share his session. 
+      jcat should be enhanced for this

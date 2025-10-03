@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,6 +67,11 @@ func (m *Messaging) StartLiveMonitoring() error {
 		return err
 	}
 
+	// Debug: Log that monitoring started
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Live monitoring started for: %s\n", m.config.MessagesDir)
+	}
+
 	go func() {
 		for {
 			select {
@@ -76,6 +82,9 @@ func (m *Messaging) StartLiveMonitoring() error {
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					// New message file created
 					if strings.HasSuffix(event.Name, ".msg") {
+						if os.Getenv("DMUX_DEBUG") != "" {
+							fmt.Printf("[DEBUG] New message file detected: %s\n", event.Name)
+						}
 						m.handleNewMessage(event.Name)
 					}
 				}
@@ -108,23 +117,41 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 
 	msg, err := m.readMessageFile(msgFile)
 	if err != nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Failed to read message file %s: %v\n", msgFile, err)
+		}
 		return
 	}
 
 	// Check if message is for current user
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] No USER environment variable\n")
+		}
 		return
 	}
 
 	expectedPrefix := currentUser + "_"
 	fileName := filepath.Base(msgFile)
 	if !strings.HasPrefix(fileName, expectedPrefix) {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Message file %s not for user %s\n", fileName, currentUser)
+		}
 		return
 	}
 
-	// Display the message as overlay
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Processing message for user %s: %s\n", currentUser, msg.Data)
+	}
+
+	// Try multiple display methods
 	m.displayRealtimeMessage(msg)
+	
+	// Also try tmux display if we're in tmux
+	if os.Getenv("TMUX") != "" {
+		m.displayTmuxMessage(msg)
+	}
 
 	// Auto-remove old message after some time
 	go func() {
@@ -135,8 +162,11 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 
 // displayRealtimeMessage shows the message as a terminal overlay
 func (m *Messaging) displayRealtimeMessage(msg *Message) {
-	// Check if we're in an interactive terminal
-	if !isInteractiveTerminal() {
+	// Check if we're in an interactive terminal or tmux
+	if !isInteractiveTerminal() && os.Getenv("TMUX") == "" {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Not displaying message - not interactive terminal and not in TMUX\n")
+		}
 		return
 	}
 
@@ -150,7 +180,7 @@ func (m *Messaging) displayRealtimeMessage(msg *Message) {
 
 	switch msg.Type {
 	case MessageTypeInvite:
-		fmt.Printf(" 📨 INVITE from %s: Join session '%s' | jmux join %s ", msg.From, msg.Data, msg.From)
+		fmt.Printf(" 📨 INVITE from %s: Join session '%s' | dmux join %s ", msg.From, msg.Data, msg.From)
 	case MessageTypeUrgent:
 		fmt.Printf(" 🚨 URGENT from %s: %s ", msg.From, msg.Data)
 	default:
@@ -222,7 +252,7 @@ func (m *Messaging) ReadMessages() error {
 			color.Cyan("From: %s", msg.From)
 			color.Yellow("  Invitation to join session")
 			fmt.Printf("  Session: %s\n", msg.Data)
-			color.Green("  To join: jmux join %s", msg.From)
+			color.Green("  To join: dmux join %s", msg.From)
 		case MessageTypeUrgent:
 			color.Red("From: %s (URGENT)", msg.From)
 			fmt.Printf("  %s\n", msg.Data)
@@ -274,6 +304,25 @@ func (m *Messaging) readMessageFile(filePath string) (*Message, error) {
 	}
 
 	return msg, scanner.Err()
+}
+
+// displayTmuxMessage shows the message using tmux display-message
+func (m *Messaging) displayTmuxMessage(msg *Message) {
+	var tmuxMsg string
+	switch msg.Type {
+	case MessageTypeInvite:
+		tmuxMsg = fmt.Sprintf("INVITE from %s: Join session '%s' | dmux join %s", msg.From, msg.Data, msg.From)
+	case MessageTypeUrgent:
+		tmuxMsg = fmt.Sprintf("URGENT from %s: %s", msg.From, msg.Data)
+	default:
+		tmuxMsg = fmt.Sprintf("Message from %s: %s", msg.From, msg.Data)
+	}
+
+	// Use tmux display-message to show the notification
+	cmd := exec.Command("tmux", "display-message", "-d", "5000", tmuxMsg)
+	if err := cmd.Run(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Failed to display tmux message: %v\n", err)
+	}
 }
 
 // isInteractiveTerminal checks if we're in an interactive terminal

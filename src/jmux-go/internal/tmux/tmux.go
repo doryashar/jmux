@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/fatih/color"
 )
@@ -32,7 +33,7 @@ func (m *Manager) StartRegularSession() error {
 	}
 
 	color.Blue("🔄 Starting regular tmux session...")
-	color.Yellow("💡 Tip: Use 'jmux share' to make it shareable")
+	color.Yellow("💡 Tip: Use 'dmux share' to make it shareable")
 
 	// Start tmux session
 	cmd := exec.Command("tmux", "new-session")
@@ -46,6 +47,37 @@ func (m *Manager) StartRegularSession() error {
 		return err
 	}
 	return syscall.Exec(tmuxPath, []string{"tmux", "new-session"}, os.Environ())
+}
+
+// StartRegularSessionWithMessaging starts a tmux session with messaging support
+func (m *Manager) StartRegularSessionWithMessaging() error {
+	// Check if tmux is available
+	if !m.IsTmuxAvailable() {
+		return fmt.Errorf("tmux is not available. Please install tmux first")
+	}
+
+	color.Blue("🔄 Starting regular tmux session with real-time messaging...")
+	color.Yellow("💡 Tip: Use 'dmux share' to make it shareable")
+	color.Blue("📱 Real-time messaging is active - messages will appear automatically")
+
+	// Start tmux in the background, don't replace the current process
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", "dmux-main")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tmux session: %v", err)
+	}
+
+	// Small delay to ensure tmux session is ready
+	time.Sleep(200 * time.Millisecond)
+
+	// Attach to the session - this will block until tmux exits
+	color.Green("✅ Tmux session started with persistent messaging")
+	attachCmd := exec.Command("tmux", "attach-session", "-t", "dmux-main")
+	attachCmd.Stdin = os.Stdin
+	attachCmd.Stdout = os.Stdout
+	attachCmd.Stderr = os.Stderr
+	
+	// This blocks until tmux exits, keeping messaging alive
+	return attachCmd.Run()
 }
 
 // AttachToSession attaches to an existing tmux session
@@ -94,7 +126,7 @@ func (m *Manager) ListSessions() error {
 		return fmt.Errorf("tmux is not available")
 	}
 
-	color.Blue("📋 Tmux sessions (jmux-enhanced):")
+	color.Blue("📋 Tmux sessions (dmux-enhanced):")
 	
 	cmd := exec.Command("tmux", "list-sessions")
 	cmd.Stdout = os.Stdout
@@ -103,7 +135,7 @@ func (m *Manager) ListSessions() error {
 	err := cmd.Run()
 	
 	fmt.Println()
-	color.Blue("💡 Tip: Use 'jmux sessions' to see shared sessions")
+	color.Blue("💡 Tip: Use 'dmux sessions' to see shared sessions")
 	
 	return err
 }
@@ -180,7 +212,7 @@ func (m *Manager) SetupTmuxSession(sessionName string) error {
 	}
 
 	// Set tmux status to show sharing info
-	statusMsg := fmt.Sprintf("[SHARED] Session: %s | Use 'jmux stop' to stop sharing", sessionName)
+	statusMsg := fmt.Sprintf("[SHARED] Session: %s | Use 'dmux stop' to stop sharing", sessionName)
 	
 	cmd := exec.Command("tmux", "set-option", "-g", "status-right", statusMsg)
 	if err := cmd.Run(); err != nil {

@@ -17,10 +17,10 @@ var shareCmd = &cobra.Command{
 	Long: `Share the current tmux session with other users.
 
 Examples:
-  jmux share                              # Share current session publicly
-  jmux share tomere                       # Share with name 'tomere'
-  jmux share --name mysession             # Share with custom name
-  jmux share --private --invite user1,user2  # Private session with invites`,
+  dmux share                              # Share current session publicly
+  dmux share tomere                       # Share with name 'tomere'
+  dmux share --name mysession             # Share with custom name
+  dmux share --private --invite user1,user2  # Private session with invites`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use positional argument if provided, otherwise use flag
 		sessionName := shareName
