@@ -11,6 +11,7 @@ import (
 	"jmux/internal/session"
 	"jmux/internal/tmux"
 	"jmux/internal/updater"
+	"jmux/internal/version"
 )
 
 var (
@@ -35,13 +36,29 @@ Features:
 - Built-in jcat networking (no socat dependency)
 - Live session monitoring`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Skip initialization for help and completion commands
-		if cmd.Name() == "help" || cmd.Name() == "completion" {
+		// Skip initialization for commands that don't need the full system
+		skipInit := cmd.Name() == "help" || 
+				   cmd.Name() == "completion" || 
+				   cmd.Name() == "version"
+		
+		// Also skip if --version flag is set on root command
+		if versionFlag, _ := cmd.Flags().GetBool("version"); versionFlag {
+			skipInit = true
+		}
+		
+		if skipInit {
 			return
 		}
+		
 		initializeSystem()
 	},
 	Run: func(cmd *cobra.Command, args []string) {
+		// Check for version flag first
+		if versionFlag, _ := cmd.Flags().GetBool("version"); versionFlag {
+			fmt.Println(version.GetVersion())
+			return
+		}
+		
 		// If no subcommand, start a regular tmux session
 		startRegularSession()
 	},
@@ -58,7 +75,8 @@ func Execute() error {
 }
 
 func init() {
-	// Add global flags here if needed
+	// Add version flag to root command
+	rootCmd.Flags().BoolP("version", "V", false, "Show version information")
 }
 
 // initializeSystem initializes the jmux system
