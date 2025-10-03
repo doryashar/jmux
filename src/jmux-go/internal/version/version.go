@@ -8,8 +8,8 @@ import (
 // Version information - will be set at build time
 var (
 	Version   = "v1.1.0"
-	GitCommit = "unknown"
-	BuildTime = "unknown"
+	GitCommit = "412779631d7fe91f81222b22f911520bc708210b"
+	BuildTime = "2025-10-03 18:35:01 UTC"
 	GoVersion = runtime.Version()
 )
 
@@ -20,7 +20,7 @@ func GetVersion() string {
 
 // GetFullVersion returns detailed version information
 func GetFullVersion() string {
-	return fmt.Sprintf("dmux %s\\nGit commit: %s\\nBuild time: %s\\nGo version: %s",
+	return fmt.Sprintf("dmux %s\nGit commit: %s\nBuild time: %s\nGo version: %s",
 		Version, GitCommit, BuildTime, GoVersion)
 }
 
