@@ -31,8 +31,8 @@ if ! git diff-index --quiet HEAD --; then
     exit 1
 fi
 
-# Get current version
-CURRENT_VERSION=$(grep 'Version.*=' "$VERSION_FILE" | sed 's/.*"\(.*\)".*/\1/')
+# Get current version - be more specific to avoid matching GoVersion
+CURRENT_VERSION=$(grep -E '^\s*Version\s*=' "$VERSION_FILE" | sed 's/.*"\(.*\)".*/\1/')
 echo -e "${BLUE}Current version: ${CURRENT_VERSION}${NC}"
 
 # Determine release version
