@@ -39,13 +39,22 @@ type Messaging struct {
 	config  *config.Config
 	watcher *fsnotify.Watcher
 	done    chan bool
+	logger  *Logger
 }
 
 // NewMessaging creates a new messaging instance
 func NewMessaging(cfg *config.Config) *Messaging {
+	// Try to create logger, but don't fail if we can't
+	logger, err := NewLogger(cfg.MonitorLogFile)
+	if err != nil {
+		fmt.Printf("Warning: Could not create monitor log file: %v\n", err)
+		logger = nil
+	}
+
 	return &Messaging{
 		config: cfg,
 		done:   make(chan bool),
+		logger: logger,
 	}
 }
 
@@ -67,9 +76,9 @@ func (m *Messaging) StartLiveMonitoring() error {
 		return err
 	}
 
-	// Debug: Log that monitoring started
-	if os.Getenv("DMUX_DEBUG") != "" {
-		fmt.Printf("[DEBUG] Live monitoring started for: %s\n", m.config.MessagesDir)
+	// Log that monitoring started
+	if m.logger != nil {
+		m.logger.Info("Live monitoring started for: %s", m.config.MessagesDir)
 	}
 
 	go func() {
@@ -82,8 +91,8 @@ func (m *Messaging) StartLiveMonitoring() error {
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					// New message file created
 					if strings.HasSuffix(event.Name, ".msg") {
-						if os.Getenv("DMUX_DEBUG") != "" {
-							fmt.Printf("[DEBUG] New message file detected: %s\n", event.Name)
+						if m.logger != nil {
+							m.logger.Debug("New message file detected: %s", event.Name)
 						}
 						m.handleNewMessage(event.Name)
 					}
@@ -92,7 +101,9 @@ func (m *Messaging) StartLiveMonitoring() error {
 				if !ok {
 					return
 				}
-				fmt.Printf("Watcher error: %v\n", err)
+				if m.logger != nil {
+					m.logger.Error("Watcher error: %v", err)
+				}
 			case <-m.done:
 				return
 			}
@@ -104,9 +115,18 @@ func (m *Messaging) StartLiveMonitoring() error {
 
 // StopLiveMonitoring stops the live message monitoring
 func (m *Messaging) StopLiveMonitoring() {
+	if m.logger != nil {
+		m.logger.LogMonitorStop()
+	}
+	
 	if m.watcher != nil {
 		m.done <- true
 		m.watcher.Close()
+	}
+	
+	// Close logger
+	if m.logger != nil {
+		m.logger.Close()
 	}
 }
 
@@ -117,8 +137,8 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 
 	msg, err := m.readMessageFile(msgFile)
 	if err != nil {
-		if os.Getenv("DMUX_DEBUG") != "" {
-			fmt.Printf("[DEBUG] Failed to read message file %s: %v\n", msgFile, err)
+		if m.logger != nil {
+			m.logger.Debug("Failed to read message file %s: %v", msgFile, err)
 		}
 		return
 	}
@@ -126,8 +146,8 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 	// Check if message is for current user
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
-		if os.Getenv("DMUX_DEBUG") != "" {
-			fmt.Printf("[DEBUG] No USER environment variable\n")
+		if m.logger != nil {
+			m.logger.Debug("No USER environment variable")
 		}
 		return
 	}
@@ -135,30 +155,42 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 	expectedPrefix := currentUser + "_"
 	fileName := filepath.Base(msgFile)
 	if !strings.HasPrefix(fileName, expectedPrefix) {
-		if os.Getenv("DMUX_DEBUG") != "" {
-			fmt.Printf("[DEBUG] Message file %s not for user %s\n", fileName, currentUser)
+		if m.logger != nil {
+			m.logger.Debug("Message file %s not for user %s", fileName, currentUser)
 		}
 		return
 	}
 
-	if os.Getenv("DMUX_DEBUG") != "" {
-		fmt.Printf("[DEBUG] Processing message for user %s: %s\n", currentUser, msg.Data)
+	if m.logger != nil {
+		m.logger.LogMessageProcessed(msg.From, string(msg.Type), msg.Data)
 	}
 
 	// Display message using configured method
 	switch m.config.MessageDisplayMethod {
 	case "kdialog":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("kdialog")
+		}
 		m.displayKDialogMessage(msg)
 	case "notify":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("notify-send")
+		}
 		m.displayNotifyMessage(msg)
 	case "tmux":
 		if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
+			if m.logger != nil {
+				m.logger.LogDisplayMethod("tmux")
+			}
 			m.displayTmuxMessage(msg)
 		} else {
 			// Fallback to auto-detect
 			m.displayAutoMessage(msg)
 		}
 	case "terminal":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("terminal")
+		}
 		m.displayRealtimeMessage(msg)
 	case "auto":
 		m.displayAutoMessage(msg)
@@ -463,22 +495,22 @@ func (m *Messaging) displayNotifyMessage(msg *Message) {
 
 // displayAutoMessage automatically chooses the best display method
 func (m *Messaging) displayAutoMessage(msg *Message) {
-	if os.Getenv("DMUX_DEBUG") != "" {
-		fmt.Printf("[DEBUG] Auto-detecting best display method\n")
+	if m.logger != nil {
+		m.logger.Debug("Auto-detecting best display method")
 	}
 
 	// Priority order: kdialog -> notify-send -> tmux -> terminal
 	if _, err := exec.LookPath("kdialog"); err == nil {
-		if os.Getenv("DMUX_DEBUG") != "" {
-			fmt.Printf("[DEBUG] Using kdialog for display\n")
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("kdialog (auto-detected)")
 		}
 		m.displayKDialogMessage(msg)
 		return
 	}
 	
 	if _, err := exec.LookPath("notify-send"); err == nil {
-		if os.Getenv("DMUX_DEBUG") != "" {
-			fmt.Printf("[DEBUG] Using notify-send for display\n")
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("notify-send (auto-detected)")
 		}
 		m.displayNotifyMessage(msg)
 		return
@@ -486,16 +518,16 @@ func (m *Messaging) displayAutoMessage(msg *Message) {
 	
 	// Check for tmux sessions
 	if os.Getenv("TMUX") != "" || m.hasTmuxSessions() {
-		if os.Getenv("DMUX_DEBUG") != "" {
-			fmt.Printf("[DEBUG] Using tmux for display\n")
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("tmux (auto-detected)")
 		}
 		m.displayTmuxMessage(msg)
 		return
 	}
 	
 	// Fallback to terminal
-	if os.Getenv("DMUX_DEBUG") != "" {
-		fmt.Printf("[DEBUG] Using terminal for display\n")
+	if m.logger != nil {
+		m.logger.LogDisplayMethod("terminal (auto-detected fallback)")
 	}
 	m.displayRealtimeMessage(msg)
 }

@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -87,10 +91,60 @@ var monitorRestartCmd = &cobra.Command{
 	},
 }
 
+// monitorLogsCmd shows monitor logs
+var monitorLogsCmd = &cobra.Command{
+	Use:   "logs",
+	Short: "Show monitor logs",
+	Long:  `Display the messaging monitor log file.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		logFile := cfg.MonitorLogFile
+		
+		// Check if log file exists
+		if _, err := os.Stat(logFile); os.IsNotExist(err) {
+			color.Yellow("No log file found at: %s", logFile)
+			color.Blue("💡 Start the monitor to begin logging: dmux monitor start")
+			return
+		}
+		
+		// Get number of lines to show
+		lines, _ := cmd.Flags().GetInt("lines")
+		follow, _ := cmd.Flags().GetBool("follow")
+		
+		if follow {
+			color.Blue("Following monitor logs (Ctrl+C to exit):")
+			color.Blue("Log file: %s", logFile)
+			fmt.Println()
+			
+			// Use tail -f equivalent
+			execCmd := exec.Command("tail", "-f", logFile)
+			execCmd.Stdout = os.Stdout
+			execCmd.Stderr = os.Stderr
+			execCmd.Run()
+		} else {
+			color.Blue("Monitor logs (%d lines):", lines)
+			color.Blue("Log file: %s", logFile)
+			fmt.Println()
+			
+			// Use tail to show last N lines
+			execCmd := exec.Command("tail", "-n", fmt.Sprintf("%d", lines), logFile)
+			execCmd.Stdout = os.Stdout
+			execCmd.Stderr = os.Stderr
+			if err := execCmd.Run(); err != nil {
+				color.Red("Failed to read log file: %v", err)
+			}
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(monitorCmd)
 	monitorCmd.AddCommand(monitorStatusCmd)
 	monitorCmd.AddCommand(monitorStartCmd)
 	monitorCmd.AddCommand(monitorStopCmd)
 	monitorCmd.AddCommand(monitorRestartCmd)
+	monitorCmd.AddCommand(monitorLogsCmd)
+	
+	// Add flags for logs command
+	monitorLogsCmd.Flags().IntP("lines", "n", 50, "Number of lines to show")
+	monitorLogsCmd.Flags().BoolP("follow", "f", false, "Follow log file (like tail -f)")
 }

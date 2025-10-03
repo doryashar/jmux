@@ -20,6 +20,7 @@ type Config struct {
 	NotificationDuration   int
 	WatcherPIDFile         string
 	MonitorPIDFile         string
+	MonitorLogFile         string
 	MessageDisplayMethod   string // "kdialog", "terminal", "tmux"
 }
 
@@ -43,6 +44,7 @@ func DefaultConfig() *Config {
 		NotificationDuration:   getEnvOrDefaultInt("JMUX_NOTIFICATION_DURATION", 5),
 		WatcherPIDFile:         filepath.Join(configDir, "watcher.pid"),
 		MonitorPIDFile:         filepath.Join("/tmp", "dmux-monitor-"+os.Getenv("USER")+".pid"),
+		MonitorLogFile:         filepath.Join(configDir, "monitor.log"),
 		MessageDisplayMethod:   getEnvOrDefault("DMUX_MESSAGE_DISPLAY", "auto"),
 	}
 }
