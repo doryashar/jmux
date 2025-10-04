@@ -100,7 +100,7 @@ func (c *Config) EnsureSetSizeScript() error {
 	return nil
 }
 
-// isSetSizeScriptCurrent checks if the setsize script contains the profile sourcing
+// isSetSizeScriptCurrent checks if the setsize script contains the latest features
 func (c *Config) isSetSizeScriptCurrent() bool {
 	file, err := os.Open(c.SetSizeScript)
 	if err != nil {
@@ -108,13 +108,20 @@ func (c *Config) isSetSizeScriptCurrent() bool {
 	}
 	defer file.Close()
 
+	hasProfile := false
+	hasMode := false
+	
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), "Source jmux profile") {
-			return true
+		line := scanner.Text()
+		if strings.Contains(line, "Source jmux profile") {
+			hasProfile = true
+		}
+		if strings.Contains(line, "JCAT_MODE") {
+			hasMode = true
 		}
 	}
-	return false
+	return hasProfile && hasMode
 }
 
 // createSetSizeScript creates the setsize.sh script
@@ -147,15 +154,32 @@ if [[ -z "$SESSION_NAME" ]]; then
     SESSION_NAME="jmux-fallback-session"
 fi
 
+# Determine tmux command based on JCAT_MODE
+TMUX_MODE="${JCAT_MODE:-pair}"
+case "$TMUX_MODE" in
+    "view")
+        TMUX_ARGS="attach-session -t $SESSION_NAME -r"
+        echo "Joining session in view-only mode..."
+        ;;
+    "rogue")
+        TMUX_ARGS="new-session -t $SESSION_NAME"
+        echo "Joining session in rogue mode (independent control)..."
+        ;;
+    *)
+        TMUX_ARGS="new -A -s $SESSION_NAME"
+        echo "Joining session in pair mode (shared control)..."
+        ;;
+esac
+
 # Try multiple common tmux locations
 if command -v tmux &> /dev/null; then
-    exec tmux new -A -s "$SESSION_NAME"
+    exec tmux $TMUX_ARGS
 elif [[ -x "/bin/tmux" ]]; then
-    exec /bin/tmux new -A -s "$SESSION_NAME"
+    exec /bin/tmux $TMUX_ARGS
 elif [[ -x "/usr/bin/tmux" ]]; then
-    exec /usr/bin/tmux new -A -s "$SESSION_NAME"
+    exec /usr/bin/tmux $TMUX_ARGS
 elif [[ -x "$HOME/.local/bin/tmux" ]]; then
-    exec $HOME/.local/bin/tmux new -A -s "$SESSION_NAME"
+    exec $HOME/.local/bin/tmux $TMUX_ARGS
 else
     echo "Error: tmux not found in any common location"
     echo "Available paths:"

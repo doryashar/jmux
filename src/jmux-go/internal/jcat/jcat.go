@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -32,6 +33,7 @@ type Server struct {
 // Client represents a jcat client
 type Client struct {
 	connectAddr string
+	mode        string // "pair", "view", or "rogue"
 }
 
 // NewServer creates a new jcat server
@@ -46,6 +48,15 @@ func NewServer(listenAddr, rcfile string) *Server {
 func NewClient(connectAddr string) *Client {
 	return &Client{
 		connectAddr: connectAddr,
+		mode:        "pair", // default mode
+	}
+}
+
+// NewClientWithMode creates a new jcat client with specified mode
+func NewClientWithMode(connectAddr, mode string) *Client {
+	return &Client{
+		connectAddr: connectAddr,
+		mode:        mode,
 	}
 }
 
@@ -85,6 +96,13 @@ func (c *Client) Connect() error {
 		log.Printf("Connected to jcat server version %s", JcatVersion)
 	} else {
 		return fmt.Errorf("invalid handshake: %s", string(handshake))
+	}
+
+	// Send mode information to server
+	modeMsg := fmt.Sprintf("MODE:%s\n", c.mode)
+	_, err = conn.Write([]byte(modeMsg))
+	if err != nil {
+		return fmt.Errorf("failed to send mode: %v", err)
 	}
 
 	// Configure yamux client
@@ -168,6 +186,23 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
+	// Read mode information from client
+	modeBuffer := make([]byte, 256)
+	n, err := conn.Read(modeBuffer)
+	if err != nil {
+		log.Printf("[%s] mode read error: %v", remote, err)
+		return
+	}
+	
+	// Parse mode from "MODE:value\n" format
+	modeStr := string(modeBuffer[:n])
+	clientMode := "pair" // default
+	if strings.HasPrefix(modeStr, "MODE:") && strings.Contains(modeStr, "\n") {
+		clientMode = strings.TrimSpace(strings.Split(modeStr, ":")[1])
+		clientMode = strings.TrimSpace(strings.Split(clientMode, "\n")[0])
+	}
+	log.Printf("[%s] client joining in %s mode", remote, clientMode)
+
 	// Configure yamux server
 	config := yamux.DefaultConfig()
 	config.EnableKeepAlive = true
@@ -200,21 +235,23 @@ func (s *Server) handle(conn net.Conn) {
 export SOCAT_SOCKPORT=%s
 export SOCAT_PEERADDR=%s
 export SOCAT_PEERPORT=%s
+export JCAT_MODE=%s
 if [[ -f "%s" ]]; then
     source %s
 else
     echo "Warning: setsize script not found at %s" >&2
 fi
 exec /bin/bash -i
-`, localPort, remoteHost, remotePort, s.rcfile, s.rcfile, s.rcfile)
+`, localPort, remoteHost, remotePort, clientMode, s.rcfile, s.rcfile, s.rcfile)
 		cmd = exec.Command("/bin/bash", "-c", wrapperScript)
 	} else {
 		wrapperScript := fmt.Sprintf(`
 export SOCAT_SOCKPORT=%s
 export SOCAT_PEERADDR=%s
 export SOCAT_PEERPORT=%s
+export JCAT_MODE=%s
 exec /bin/bash -i
-`, localPort, remoteHost, remotePort)
+`, localPort, remoteHost, remotePort, clientMode)
 		cmd = exec.Command("/bin/bash", "-c", wrapperScript)
 	}
 

@@ -202,11 +202,22 @@ func (m *Manager) JoinSession(hostUser, sessionName string, modeOverride string)
 		hostIP = "localhost" // fallback
 	}
 
-	color.Cyan("Connecting to %s's session (%s) at %s:%d...", hostUser, session.Name, hostIP, session.Port)
+	// Display mode-specific connection message
+	var modeDesc string
+	switch actualMode {
+	case "view":
+		modeDesc = " in view-only mode"
+	case "rogue":
+		modeDesc = " in rogue mode (independent control)"
+	default:
+		modeDesc = " in pair mode (shared control)"
+	}
+	
+	color.Cyan("Connecting to %s's session (%s) at %s:%d%s...", hostUser, session.Name, hostIP, session.Port, modeDesc)
 	color.Yellow("Press Ctrl+C to disconnect")
 
-	// Connect with jcat client
-	client := jcat.NewClient(fmt.Sprintf("%s:%d", hostIP, session.Port))
+	// Connect with jcat client using the specified mode
+	client := jcat.NewClientWithMode(fmt.Sprintf("%s:%d", hostIP, session.Port), actualMode)
 	return client.Connect()
 }
 
