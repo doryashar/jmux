@@ -2,6 +2,11 @@
 
 Enhanced tmux session sharing tool with support for named sessions, multiple invitees, private sessions, and real-time status display.
 
+## GO!
+mkdir -p ${HOME}/.local/bin/ && cd ${HOME}/.local/bin/ && curl --silent -L https://github.com/doryashar/jmux/releases/download/v1.1.1/dmux -o dmux && chmod +x ${HOME}/.local/bin/dmux && cd - && \
+grep -q 'set path = ( $HOME/.local/bin $path )' $HOME/.tcshrc.user || echo '\nif ( "$path" !~ *"$HOME/.local/bin"* ) set path = ( $HOME/.local/bin $path )' >> $HOME/.tcshrc.user
+
+
 ## Features
 
 - 🚀 **Easy sharing**: Share tmux sessions with simple commands
@@ -328,3 +333,13 @@ This project is provided as-is for internal use.
       if not using a shared directory - you should display the full ip:port in your join command.
 [ ]   add request-for-share command which will start a reverse port listen so that if a client connects to that port, the client will share his session. 
       jcat should be enhanced for this
+
+Assistant mode (now)
+View only mode
+Pair programming mode
+Switch modes
+
+Kick / Ban user
+Password / ssh key / encryption
+
+Can we pass all keystrokes but client special keys?

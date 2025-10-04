@@ -25,6 +25,7 @@ type Session struct {
 	PID       int
 	Private   bool
 	AllowedUsers []string
+	Mode      string // "pair", "view", or "rogue"
 }
 
 // Manager handles session management
@@ -42,7 +43,7 @@ func NewManager(cfg *config.Config, msg *messaging.Messaging) *Manager {
 }
 
 // StartShare starts sharing a tmux session
-func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []string) error {
+func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []string, mode string) error {
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
 		return fmt.Errorf("unable to determine current user")
@@ -84,6 +85,7 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		PID:          os.Getpid(),
 		Private:      private,
 		AllowedUsers: inviteUsers,
+		Mode:         mode,
 	}
 
 	if err := m.registerSession(session); err != nil {
@@ -103,7 +105,17 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		}
 	}
 
-	color.Green("✓ Session '%s' shared on port %d", tmuxSessionName, port)
+	// Display mode-specific message
+	var modeDesc string
+	switch mode {
+	case "view":
+		modeDesc = " (view-only mode)"
+	case "rogue":
+		modeDesc = " (rogue mode - independent control)"
+	default:
+		modeDesc = " (pair mode - shared control)"
+	}
+	color.Green("✓ Session '%s' shared on port %d%s", tmuxSessionName, port, modeDesc)
 	if len(inviteUsers) > 0 {
 		color.Cyan("📧 Invitations sent to: %s", strings.Join(inviteUsers, ", "))
 	}
@@ -149,7 +161,7 @@ exec $SHELL
 }
 
 // JoinSession joins an existing session
-func (m *Manager) JoinSession(hostUser, sessionName string) error {
+func (m *Manager) JoinSession(hostUser, sessionName string, modeOverride string) error {
 	// Find the session
 	session, err := m.findUserSession(hostUser, sessionName)
 	if err != nil {
@@ -166,6 +178,24 @@ func (m *Manager) JoinSession(hostUser, sessionName string) error {
 		return fmt.Errorf("access denied: private session")
 	}
 
+	// Determine the actual mode to use (override takes precedence)
+	actualMode := session.Mode
+	if modeOverride != "" {
+		actualMode = modeOverride
+	}
+
+	// If no mode is set in session (backward compatibility), default to pair
+	if actualMode == "" {
+		actualMode = "pair"
+	}
+
+	// Check if this is a local session (same user or local connection)
+	if hostUser == currentUser {
+		// Local session - use direct tmux connection
+		return m.joinLocalSession(session, actualMode)
+	}
+
+	// Remote session - use jcat for now (network connection)
 	// Get host IP (for now, use localhost or try to resolve)
 	hostIP, err := m.resolveHostIP(hostUser)
 	if err != nil {
@@ -257,6 +287,22 @@ func (m *Manager) ListSessions() error {
 		} else {
 			color.Green("  Public session")
 		}
+		
+		// Display mode information
+		mode := session.Mode
+		if mode == "" {
+			mode = "pair" // default for backward compatibility
+		}
+		var modeDesc string
+		switch mode {
+		case "view":
+			modeDesc = "View-only (read-only)"
+		case "rogue":
+			modeDesc = "Rogue (independent control)"
+		default:
+			modeDesc = "Pair (shared control)"
+		}
+		fmt.Printf("  Mode: %s\n", modeDesc)
 
 		color.Yellow("  To join: dmux join %s", session.User)
 	}
@@ -294,7 +340,8 @@ STARTED=%d
 PID=%d
 PRIVATE=%t
 ALLOWED_USERS=%s
-`, session.User, session.Name, session.Port, session.Started, session.PID, session.Private, strings.Join(session.AllowedUsers, ","))
+MODE=%s
+`, session.User, session.Name, session.Port, session.Started, session.PID, session.Private, strings.Join(session.AllowedUsers, ","), session.Mode)
 
 	return os.WriteFile(filePath, []byte(content), 0644)
 }
@@ -406,6 +453,8 @@ func (m *Manager) readSessionFile(filePath string) (*Session, error) {
 			if value != "" {
 				session.AllowedUsers = strings.Split(value, ",")
 			}
+		case "MODE":
+			session.Mode = value
 		}
 	}
 
@@ -468,6 +517,54 @@ func (m *Manager) resolveHostIP(hostUser string) (string, error) {
 
 func (m *Manager) isInTmuxSession() bool {
 	return os.Getenv("TMUX") != ""
+}
+
+// joinLocalSession joins a local session using direct tmux commands
+func (m *Manager) joinLocalSession(session *Session, mode string) error {
+	// For local sessions, we first try to find the session in the default tmux server
+	// If that fails, we'll check if it exists and report an error
+	
+	// First, check if the session exists in the default tmux server
+	checkCmd := exec.Command("tmux", "has-session", "-t", session.Name)
+	sessionExists := checkCmd.Run() == nil
+	
+	if !sessionExists {
+		// Session might be running in a custom socket, try to find it
+		return fmt.Errorf("session '%s' not found in default tmux server. For local shared sessions, please ensure the session is accessible via the default tmux server", session.Name)
+	}
+	
+	var cmd *exec.Cmd
+	var modeDesc string
+	
+	switch mode {
+	case "view":
+		// View-only mode: attach with read-only flag
+		cmd = exec.Command("tmux", "attach-session", "-t", session.Name, "-r")
+		modeDesc = "view-only (read-only)"
+		color.Cyan("Joining %s's session (%s) in %s mode...", session.User, session.Name, modeDesc)
+		color.Yellow("You are in read-only mode. Press Ctrl+C to disconnect")
+		
+	case "rogue":
+		// Rogue mode: create new session that shares the same server
+		cmd = exec.Command("tmux", "new-session", "-t", session.Name)
+		modeDesc = "rogue (independent control)"
+		color.Cyan("Joining %s's session (%s) in %s mode...", session.User, session.Name, modeDesc)
+		color.Yellow("You have independent control. Press Ctrl+C to disconnect")
+		
+	default: // pair mode
+		// Pair mode: standard attach (shared control)
+		cmd = exec.Command("tmux", "attach-session", "-t", session.Name)
+		modeDesc = "pair (shared control)"
+		color.Cyan("Joining %s's session (%s) in %s mode...", session.User, session.Name, modeDesc)
+		color.Yellow("You have shared control. Press Ctrl+C to disconnect")
+	}
+	
+	// Set up command to run interactively
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	return cmd.Run()
 }
 
 // updatePortMapping adds/updates entry in port_sessions.db
