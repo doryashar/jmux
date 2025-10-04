@@ -90,6 +90,12 @@ func initializeSystem() {
 		color.Red("Error creating directories: %v", err)
 		os.Exit(1)
 	}
+	
+	// Ensure setsize script exists and is current
+	if err := cfg.EnsureSetSizeScript(); err != nil {
+		color.Red("Error creating setsize script: %v", err)
+		os.Exit(1)
+	}
 
 	// Initialize messaging system
 	msgSystem = messaging.NewMessaging(cfg)

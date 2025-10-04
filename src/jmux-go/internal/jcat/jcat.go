@@ -195,12 +195,18 @@ func (s *Server) handle(conn net.Conn) {
 	// Create bash command with environment variables
 	var cmd *exec.Cmd
 	if s.rcfile != "" {
+		// Check if the rcfile exists before trying to source it
 		wrapperScript := fmt.Sprintf(`
 export SOCAT_SOCKPORT=%s
 export SOCAT_PEERADDR=%s
 export SOCAT_PEERPORT=%s
-source %s
-`, localPort, remoteHost, remotePort, s.rcfile)
+if [[ -f "%s" ]]; then
+    source %s
+else
+    echo "Warning: setsize script not found at %s" >&2
+fi
+exec /bin/bash -i
+`, localPort, remoteHost, remotePort, s.rcfile, s.rcfile, s.rcfile)
 		cmd = exec.Command("/bin/bash", "-c", wrapperScript)
 	} else {
 		wrapperScript := fmt.Sprintf(`
