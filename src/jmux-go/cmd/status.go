@@ -28,7 +28,7 @@ func init() {
 
 func showStatus() {
 	// Clean up stale sessions first
-	cleaned := performCleanup()
+	cleaned := performSessionCleanup()
 	if cleaned > 0 {
 		color.Yellow("🧹 Cleaned up %d stale session(s)", cleaned)
 		fmt.Println()

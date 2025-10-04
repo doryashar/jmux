@@ -331,15 +331,13 @@ This project is provided as-is for internal use.
 [ ]   live monitor without inotify
 [ ]   every share should also show (print to the host/listener session) the share command that the client should run to connect (if there are more than one sessions, the session name is preferred to be shown)
       if not using a shared directory - you should display the full ip:port in your join command.
-[ ]   add request-for-share command which will start a reverse port listen so that if a client connects to that port, the client will share his session. 
-      jcat should be enhanced for this
-
-Assistant mode (now)
-View only mode
-Pair programming mode
-Switch modes
-
-Kick / Ban user
-Password / ssh key / encryption
-
-Can we pass all keystrokes but client special keys?
+[ ]   add request-for-share command which will start a reverse port listen so that if a client connects to that port, the client will share his session. jcat should be enhanced for this
+[ ]   Modes:
+         Assistant mode (now)
+         View only mode
+         Pair programming mode
+[ ]   Both host and client should be able to bring up a menu that only they can see.
+[ ]   Add ability to Switch modes
+[ ]   host commands: kick / Ban user
+[ ]   client commands: leave / switch to another remote-session / rename
+[ ]   Secure connection: Password / ssl key / encryption

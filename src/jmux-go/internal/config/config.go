@@ -162,7 +162,7 @@ case "$TMUX_MODE" in
         echo "Joining session in view-only mode..."
         ;;
     "rogue")
-        TMUX_ARGS="new-session -t $SESSION_NAME"
+        TMUX_ARGS="new-session -t ${SESSION_NAME}_rogue"
         echo "Joining session in rogue mode (independent control)..."
         ;;
     *)
