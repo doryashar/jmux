@@ -122,8 +122,13 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 
 	// If already in tmux, just start the server
 	if m.isInTmuxSession() {
-		server := jcat.NewServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript)
-		return server.Start()
+		if m.config.Security.Enabled {
+			secureServer := jcat.NewSecureServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript, m.config.Security)
+			return secureServer.Start()
+		} else {
+			server := jcat.NewServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript)
+			return server.Start()
+		}
 	}
 
 	// Create wrapper script to start jcat server in background
@@ -161,7 +166,7 @@ exec $SHELL
 }
 
 // JoinSession joins an existing session
-func (m *Manager) JoinSession(hostUser, sessionName string, modeOverride string) error {
+func (m *Manager) JoinSession(hostUser, sessionName string, modeOverride string, password string) error {
 	// Find the session
 	session, err := m.findUserSession(hostUser, sessionName)
 	if err != nil {
@@ -217,8 +222,13 @@ func (m *Manager) JoinSession(hostUser, sessionName string, modeOverride string)
 	color.Yellow("Press Ctrl+C to disconnect")
 
 	// Connect with jcat client using the specified mode
-	client := jcat.NewClientWithMode(fmt.Sprintf("%s:%d", hostIP, session.Port), actualMode)
-	return client.Connect()
+	if m.config.Security.Enabled {
+		secureClient := jcat.NewSecureClientWithMode(fmt.Sprintf("%s:%d", hostIP, session.Port), actualMode, m.config.Security)
+		return secureClient.Connect(sessionName, password)
+	} else {
+		client := jcat.NewClientWithMode(fmt.Sprintf("%s:%d", hostIP, session.Port), actualMode)
+		return client.Connect()
+	}
 }
 
 // StopShare stops sharing sessions
@@ -535,6 +545,12 @@ func (m *Manager) joinLocalSession(session *Session, mode string) error {
 	// For local sessions, we first try to find the session in the default tmux server
 	// If that fails, we'll check if it exists and report an error
 	
+	// TODO: Dory
+	//// Construct the tmux socket path based on the session port
+	//// This assumes the session is using a socket file based on port
+	//socketPath := fmt.Sprintf("/tmp/tmux-%d/default", session.Port)
+	//for every command need to add "-S", socketPath
+
 	// First, check if the session exists in the default tmux server
 	checkCmd := exec.Command("tmux", "has-session", "-t", session.Name)
 	sessionExists := checkCmd.Run() == nil

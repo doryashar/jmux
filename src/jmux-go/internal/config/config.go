@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	
+	"jmux/internal/security"
 )
 
 // Config holds all jmux configuration
@@ -24,6 +26,7 @@ type Config struct {
 	MonitorPIDFile         string
 	MonitorLogFile         string
 	MessageDisplayMethod   string // "kdialog", "terminal", "tmux"
+	Security               *security.SecurityConfig
 }
 
 // DefaultConfig returns the default configuration
@@ -48,6 +51,7 @@ func DefaultConfig() *Config {
 		MonitorPIDFile:         filepath.Join("/tmp", "dmux-monitor-"+os.Getenv("USER")+".pid"),
 		MonitorLogFile:         filepath.Join(configDir, "monitor.log"),
 		MessageDisplayMethod:   getEnvOrDefault("DMUX_MESSAGE_DISPLAY", "auto"),
+		Security:               security.DefaultSecurityConfig(),
 	}
 }
 

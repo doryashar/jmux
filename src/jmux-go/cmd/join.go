@@ -5,8 +5,9 @@ import (
 )
 
 var (
-	joinView  bool
-	joinRogue bool
+	joinView     bool
+	joinRogue    bool
+	joinPassword string
 )
 
 // joinCmd represents the join command
@@ -20,11 +21,15 @@ Join Modes:
   --view:  Force view-only mode (read-only, regardless of session mode)
   --rogue: Force rogue mode (independent control, regardless of session mode)
 
+Security Options:
+  --password: Password for secure sessions
+
 Examples:
   dmux join alice                    # Join alice's default session with its configured mode
   dmux join bob mysession           # Join bob's specific session with its configured mode
   dmux join alice --view            # Join alice's session in read-only mode
-  dmux join bob mysession --rogue   # Join bob's session in rogue mode`,
+  dmux join bob mysession --rogue   # Join bob's session in rogue mode
+  dmux join alice --password mypass # Join alice's secure session with password`,
 	Args: cobra.RangeArgs(1, 2),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Validate mutually exclusive flags
@@ -47,7 +52,7 @@ Examples:
 			modeOverride = "rogue"
 		}
 
-		err := sessMgr.JoinSession(hostUser, sessionName, modeOverride)
+		err := sessMgr.JoinSession(hostUser, sessionName, modeOverride, joinPassword)
 		if err != nil {
 			cmd.Printf("Error joining session: %v\n", err)
 			cmd.Printf("Tip: Try 'dmux sessions' to see available sessions\n")
@@ -62,4 +67,5 @@ func init() {
 	
 	joinCmd.Flags().BoolVar(&joinView, "view", false, "Force view-only mode (read-only)")
 	joinCmd.Flags().BoolVar(&joinRogue, "rogue", false, "Force rogue mode (independent control)")
+	joinCmd.Flags().StringVar(&joinPassword, "password", "", "Password for secure sessions")
 }
