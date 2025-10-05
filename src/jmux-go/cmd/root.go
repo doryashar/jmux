@@ -105,9 +105,12 @@ func initializeSystem() {
 	
 	// Start centralized monitor if realtime is enabled and monitor not already running
 	if cfg.RealtimeEnabled && !monitorMgr.IsMonitorRunning() {
-		if err := monitorMgr.StartMonitor(); err != nil {
-			color.Yellow("Warning: Could not start messaging monitor: %v", err)
-		}
+		// Start monitor asynchronously to avoid blocking main execution
+		go func() {
+			if err := monitorMgr.StartMonitor(); err != nil {
+				color.Yellow("Warning: Could not start messaging monitor: %v", err)
+			}
+		}()
 	}
 
 	// Initialize managers
@@ -117,8 +120,10 @@ func initializeSystem() {
 	// Register user in database
 	registerCurrentUser()
 
-	// Check for updates if needed (runs in background)
-	updater.CheckForUpdatesIfNeeded(cfg.ConfigDir)
+	// Check for updates if needed (skip in tmux to avoid hanging)
+	if !tmuxMgr.IsInTmuxSession() {
+		updater.CheckForUpdatesIfNeeded(cfg.ConfigDir)
+	}
 }
 
 // startRegularSession starts a regular tmux session with messaging

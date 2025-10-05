@@ -51,9 +51,26 @@ func showStatus() {
 	if tmuxSession := os.Getenv("TMUX"); tmuxSession != "" {
 		color.Green("✓ Currently in tmux session")
 		
-		// Get current session name
-		if sessionName, err := tmuxMgr.GetCurrentSession(); err == nil {
+		// Get current session name (with timeout to prevent hanging)
+		sessionChan := make(chan string, 1)
+		errChan := make(chan error, 1)
+		go func() {
+			sessionName, err := tmuxMgr.GetCurrentSession()
+			if err != nil {
+				errChan <- err
+			} else {
+				sessionChan <- sessionName
+			}
+		}()
+		
+		select {
+		case sessionName := <-sessionChan:
 			fmt.Printf("  Session: %s\n", sessionName)
+		case <-errChan:
+			// Error getting session name, skip it
+		case <-time.After(1 * time.Second):
+			// Reduced timeout since we know the issue
+			fmt.Printf("  Session: (unable to retrieve)\n")
 		}
 	} else {
 		color.Yellow("○ Not currently in a tmux session")

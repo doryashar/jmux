@@ -63,24 +63,55 @@ func (m *Manager) StartRegularSessionWithMessaging() error {
 	// Note: Messaging monitor is now handled centrally by MonitorManager
 	// No need to start separate monitor process here
 
-	// Start tmux session
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", "dmux-main")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create tmux session: %v", err)
-	}
 
-	// Small delay to ensure tmux session is ready
-	time.Sleep(200 * time.Millisecond)
+	// TODO: Dory removed
+	// // Check if session already exists
+	// sessionExists := false
+	// checkCmd := exec.Command("tmux", "has-session", "-t", "dmux-main")
+	// if checkCmd.Run() == nil {
+	// 	sessionExists = true
+	// 	color.Yellow("📝 Reusing existing tmux session 'dmux-main'")
+	// } else {
+	// 	// Create new session
+	// 	cmd := exec.Command("tmux", "new-session", "-d", "-s", "dmux-main")
+	// 	if err := cmd.Run(); err != nil {
+	// 		return fmt.Errorf("failed to create tmux session: %v", err)
+	// 	}
+	// }
 
-	// Attach to the session - this will block until tmux exits
-	color.Green("✅ Tmux session started with persistent messaging")
-	attachCmd := exec.Command("tmux", "attach-session", "-t", "dmux-main")
+	// // Wait for tmux session to be ready if we just created it
+	// if !sessionExists {
+	// 	if err := m.waitForSession("dmux-main", 100*time.Millisecond); err != nil {
+	// 		// Fallback to small delay if session check fails
+	// 		time.Sleep(50 * time.Millisecond)
+	// 	}
+	// }
+
+	// // Attach to the session - this will block until tmux exits
+	// color.Green("✅ Tmux session started with persistent messaging")
+	// attachCmd := exec.Command("tmux", "attach-session", "-t", "dmux-main")
+
+
+	attachCmd := exec.Command("tmux", "new-session", "-A", "-s", "dmux-main")
 	attachCmd.Stdin = os.Stdin
 	attachCmd.Stdout = os.Stdout
 	attachCmd.Stderr = os.Stderr
 	
 	// This blocks until tmux exits
 	return attachCmd.Run()
+}
+
+// waitForSession waits for a tmux session to be ready
+func (m *Manager) waitForSession(sessionName string, timeout time.Duration) error {
+	start := time.Now()
+	for time.Since(start) < timeout {
+		cmd := exec.Command("tmux", "has-session", "-t", sessionName)
+		if err := cmd.Run(); err == nil {
+			return nil // Session is ready
+		}
+		time.Sleep(10 * time.Millisecond) // Check every 10ms
+	}
+	return fmt.Errorf("session %s not ready within timeout", sessionName)
 }
 
 // AttachToSession attaches to an existing tmux session
