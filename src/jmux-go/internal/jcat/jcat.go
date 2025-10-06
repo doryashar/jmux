@@ -241,6 +241,11 @@ if [[ -f "%s" ]]; then
 else
     echo "Warning: setsize script not found at %s" >&2
 fi
+# If we're in a tmux session and JCAT_TMUX_SESSION is set, attach to that specific session
+if [[ -n "$JCAT_TMUX_SESSION" ]]; then
+    echo "Attaching to shared tmux session: $JCAT_TMUX_SESSION"
+    exec tmux attach-session -t "$JCAT_TMUX_SESSION"
+fi
 exec /bin/bash -i
 `, localPort, remoteHost, remotePort, clientMode, s.rcfile, s.rcfile, s.rcfile)
 		cmd = exec.Command("/bin/bash", "-c", wrapperScript)
@@ -250,6 +255,11 @@ export SOCAT_SOCKPORT=%s
 export SOCAT_PEERADDR=%s
 export SOCAT_PEERPORT=%s
 export JCAT_MODE=%s
+# If we're in a tmux session and JCAT_TMUX_SESSION is set, attach to that specific session
+if [[ -n "$JCAT_TMUX_SESSION" ]]; then
+    echo "Attaching to shared tmux session: $JCAT_TMUX_SESSION"
+    exec tmux attach-session -t "$JCAT_TMUX_SESSION"
+fi
 exec /bin/bash -i
 `, localPort, remoteHost, remotePort, clientMode)
 		cmd = exec.Command("/bin/bash", "-c", wrapperScript)

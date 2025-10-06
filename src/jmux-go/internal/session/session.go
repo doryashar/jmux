@@ -845,6 +845,12 @@ func (m *Manager) startServerInBackground(port int) error {
 		args = append(args, "--secure")
 	}
 
+	// Set environment variable for the tmux session
+	setEnvCmd := exec.Command("tmux", "set-environment", "-t", currentSession, "JCAT_TMUX_SESSION", currentSession)
+	if err := setEnvCmd.Run(); err != nil {
+		return fmt.Errorf("failed to set tmux environment: %v", err)
+	}
+	
 	// Create the command string for tmux
 	cmdString := fmt.Sprintf("%s %s", jmuxBinary, strings.Join(args, " "))
 	
@@ -943,7 +949,7 @@ func (m *Manager) StartReverseShare(inviteUsers []string, password string, priva
 	color.Yellow("💡 Invited users can join with: dmux join-share %s", currentUser)
 	color.Blue("🛑 Use 'dmux stop %s' to stop reverse sharing", session.Name)
 
-	// Keep the process alive by waiting for signals or connections
+	// Ensure we have a tmux session to share, then keep the process alive
 	return m.waitForReverseConnections(session)
 }
 
@@ -972,10 +978,14 @@ func (m *Manager) waitForReverseConnections(session *Session) error {
 
 // startSimpleReverseListener starts a TCP listener for reverse sharing connections
 func (m *Manager) startSimpleReverseListener(session *Session) error {
-	// Start a jcat server that will handle incoming connections
-	// Bind to all interfaces so it's accessible from other machines
-	server := jcat.NewServer(fmt.Sprintf("0.0.0.0:%d", session.Port), m.config.SetSizeScript)
-	return server.Start()
+	// Check if we're already in a tmux session
+	if m.isInTmuxSession() {
+		// We're in tmux, use the existing session sharing mechanism
+		return m.startServerInBackground(session.Port)
+	} else {
+		// We're not in tmux, create a tmux session and start jcat server inside it
+		return m.createAndShareTmuxSession(session)
+	}
 }
 
 // sendReverseInvitations sends invitation messages for reverse sharing
@@ -1198,4 +1208,41 @@ func (m *Manager) parseReverseInvitation(msgFile string) (*ReverseInvitation, er
 	}
 
 	return invitation, nil
+}
+
+// createAndShareTmuxSession creates a new tmux session and starts jcat server within it
+func (m *Manager) createAndShareTmuxSession(session *Session) error {
+	// Get current executable path
+	jmuxBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get current executable path: %v", err)
+	}
+
+	// Create a unique tmux session name
+	tmuxSessionName := session.Name
+
+	color.Blue("🔄 Creating tmux session '%s' for reverse sharing...", tmuxSessionName)
+
+	// Create a new tmux session first
+	createCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSessionName, "-c", os.Getenv("HOME"))
+	if err := createCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tmux session: %v", err)
+	}
+	
+	// Set environment variable for the new session
+	setEnvCmd := exec.Command("tmux", "set-environment", "-t", tmuxSessionName, "JCAT_TMUX_SESSION", tmuxSessionName)
+	if err := setEnvCmd.Run(); err != nil {
+		return fmt.Errorf("failed to set tmux environment: %v", err)
+	}
+	
+	// Start the jcat server in the new session
+	cmdString := fmt.Sprintf("%s _internal_jcat_server %d %s", jmuxBinary, session.Port, m.config.SetSizeScript)
+	cmd := exec.Command("tmux", "send-keys", "-t", tmuxSessionName, cmdString, "Enter")
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tmux session with jcat server: %v", err)
+	}
+
+	color.Green("✅ Created tmux session '%s' with jcat server on port %d", tmuxSessionName, session.Port)
+	return nil
 }
