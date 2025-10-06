@@ -6,11 +6,20 @@ echo "Testing real-time messaging in tmux sessions..."
 export DMUX_DEBUG=1
 export JMUX_SHARED_DIR="$HOME/.jmux/shared"
 
+# Build dmux binary for testing
+DMUX_BINARY="/tmp/dmux_realtime_test"
+if (cd "$(dirname "$0")/../src/jmux-go" && go build -o "$DMUX_BINARY" .); then
+    echo "✓ dmux binary built successfully"
+else
+    echo "❌ Failed to build dmux binary"
+    exit 1
+fi
+
 # Ensure directories exist
 mkdir -p "$HOME/.jmux/shared/messages"
 
 echo "1. Starting messaging monitor manually to test..."
-./bin/dmux _internal_messaging_monitor &
+"$DMUX_BINARY" _internal_messaging_monitor &
 MONITOR_PID=$!
 
 sleep 2
@@ -45,3 +54,6 @@ else
 fi
 
 echo "Test complete!"
+
+# Cleanup
+rm -f "$DMUX_BINARY"

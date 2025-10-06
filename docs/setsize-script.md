@@ -55,7 +55,7 @@ The setsize script is used by:
 
 #### jcat Server (Primary)
 ```bash
-JCAT_SETSIZE_SCRIPT="$setsize_script" jcat -server -listen ":$port"
+JCAT_SETSIZE_SCRIPT="$setsize_script" jcat listen ":$port"
 ```
 
 #### socat Fallback

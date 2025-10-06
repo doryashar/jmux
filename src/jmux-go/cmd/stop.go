@@ -10,9 +10,13 @@ var stopCmd = &cobra.Command{
 	Short: "Stop sharing sessions",
 	Long: `Stop sharing one or more sessions.
 
+When run without arguments:
+- If inside a tmux session: stops sharing the current session only
+- If outside tmux: stops all shared sessions
+
 Examples:
-  jmux stop                    # Stop all shared sessions
-  jmux stop session1 session2 # Stop specific sessions`,
+  dmux stop                    # Stop current session (if in tmux) or all sessions
+  dmux stop session1 session2 # Stop specific sessions`,
 	Run: func(cmd *cobra.Command, args []string) {
 		err := sessMgr.StopShare(args)
 		if err != nil {

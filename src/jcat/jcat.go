@@ -3,7 +3,6 @@ package main
 
 import (
 	"encoding/gob"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -25,37 +24,62 @@ const (
 	HandshakeMsg = "JCAT/" + JcatVersion + "\n"
 )
 
-var (
-	server  = flag.Bool("server", false, "Run as server")
-	client  = flag.Bool("client", false, "Run as client")
-	listen  = flag.String("listen", ":1337", "Address to listen on ([ip]:port) when running as server")
-	connect = flag.String("connect", ":1337", "Address to connect to ([ip]:port) when running as client")
-)
-
 func main() {
-	flag.Parse()
-
-	if *server && *client {
-		log.Fatal("cannot run as both server and client")
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
 	}
 
-	if !*server && !*client {
-		log.Fatal("must specify either -server or -client")
-	}
-
-	if *server {
-		runServer()
-	} else {
-		runClient()
+	command := os.Args[1]
+	
+	switch command {
+	case "listen":
+		address := ":1337" // default
+		if len(os.Args) > 2 {
+			address = os.Args[2]
+		}
+		runServer(address)
+	case "connect":
+		if len(os.Args) < 3 {
+			log.Fatal("connect command requires host:port argument")
+		}
+		address := os.Args[2]
+		runClient(address)
+	case "version":
+		fmt.Printf("jcat version %s\n", JcatVersion)
+	case "help", "-h", "--help":
+		printUsage()
+	default:
+		fmt.Printf("Unknown command: %s\n", command)
+		printUsage()
+		os.Exit(1)
 	}
 }
 
-func runServer() {
-	ln, err := net.Listen("tcp", *listen)
+func printUsage() {
+	fmt.Printf(`jcat - TCP tunnel for terminal sharing
+
+Usage:
+  jcat listen [port]          Listen on port (default :1337)
+  jcat connect <host:port>    Connect to remote host
+  jcat version               Show version
+  jcat help                  Show this help
+
+Examples:
+  jcat listen                # Listen on default port :1337
+  jcat listen :8080          # Listen on port 8080
+  jcat listen 0.0.0.0:1337   # Listen on all interfaces, port 1337
+  jcat connect localhost:1337 # Connect to localhost:1337
+  jcat connect 192.168.1.100:8080 # Connect to remote host
+`)
+}
+
+func runServer(address string) {
+	ln, err := net.Listen("tcp", address)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("listening on %s", *listen)
+	log.Printf("listening on %s", address)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -178,8 +202,8 @@ exec /bin/bash -i
 	log.Printf("[%s] done", remote)
 }
 
-func runClient() {
-	conn, err := net.Dial("tcp", *connect)
+func runClient(address string) {
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		log.Fatalf("connection error: %v", err)
 	}

@@ -39,11 +39,16 @@ Examples:
   dmux share --secure --password mypass   # Secure encrypted session
   dmux share --secure                     # Secure session with config password`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Use positional argument if provided, otherwise use flag
-		sessionName := shareName
-		if len(args) > 0 {
+		// Determine session name: --name flag takes precedence over positional argument
+		sessionName := ""
+		if shareName != "" {
+			// --name flag was provided, use it
+			sessionName = shareName
+		} else if len(args) > 0 {
+			// No --name flag, use positional argument
 			sessionName = args[0]
 		}
+		// If neither provided, sessionName remains empty (will be auto-generated)
 		
 		// Validate mutually exclusive flags
 		if shareView && shareRogue {

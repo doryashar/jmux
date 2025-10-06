@@ -6,6 +6,15 @@ echo "🧪 Testing monitor logging functionality"
 export JMUX_SHARED_DIR="$HOME/.jmux/shared"
 export DMUX_DEBUG=1
 
+# Build dmux binary for testing
+DMUX_BINARY="/tmp/dmux_monitor_test"
+if (cd "$(dirname "$0")/../src/jmux-go" && go build -o "$DMUX_BINARY" .); then
+    echo "✓ dmux binary built successfully"
+else
+    echo "❌ Failed to build dmux binary"
+    exit 1
+fi
+
 # Clean up
 pkill -f "_internal_messaging_monitor" 2>/dev/null
 rm -f /tmp/dmux-monitor-$(whoami).pid
@@ -15,16 +24,16 @@ mkdir -p "$HOME/.config/jmux"
 
 echo ""
 echo "1. 📊 Checking logs (should be empty)..."
-./bin/dmux monitor logs -n 10
+"$DMUX_BINARY" monitor logs -n 10
 
 echo ""
 echo "2. 🚀 Starting monitor with logging..."
-./bin/dmux monitor start
+"$DMUX_BINARY" monitor start
 sleep 2
 
 echo ""
 echo "3. 📨 Sending test messages to generate logs..."
-./bin/dmux msg "$(whoami)" "Test message for logging!"
+"$DMUX_BINARY" msg "$(whoami)" "Test message for logging!"
 sleep 2
 
 cat > "$HOME/.jmux/shared/messages/$(whoami)_urgent_$(date +%s).msg" << EOF
@@ -39,7 +48,7 @@ sleep 3
 
 echo ""
 echo "4. 📜 Checking monitor logs..."
-./bin/dmux monitor logs -n 20
+"$DMUX_BINARY" monitor logs -n 20
 
 echo ""
 echo "5. 📍 Showing log file location..."
@@ -51,11 +60,14 @@ echo "  dmux monitor logs -f        # Follow logs (like tail -f)"
 
 echo ""
 echo "6. 🛑 Stopping monitor..."
-./bin/dmux monitor stop
+"$DMUX_BINARY" monitor stop
 
 echo ""
 echo "7. 📜 Final logs after stopping..."
-./bin/dmux monitor logs -n 10
+"$DMUX_BINARY" monitor logs -n 10
 
 echo ""
 echo "✅ Monitor logging test complete!"
+
+# Cleanup
+rm -f "$DMUX_BINARY"

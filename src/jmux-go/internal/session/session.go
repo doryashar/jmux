@@ -26,6 +26,7 @@ type Session struct {
 	Private   bool
 	AllowedUsers []string
 	Mode      string // "pair", "view", or "rogue"
+	IsReverse bool   // true if this is reverse sharing (client listening)
 }
 
 // Manager handles session management
@@ -76,7 +77,7 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		color.Blue("🔄 Starting tmux session '%s'...", tmuxSessionName)
 	}
 
-	// Register the session
+	// Create session object but don't register yet
 	session := &Session{
 		User:         currentUser,
 		Name:         tmuxSessionName,
@@ -88,81 +89,107 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		Mode:         mode,
 	}
 
-	if err := m.registerSession(session); err != nil {
-		return err
+	// If already in tmux, start the server in background
+	if m.isInTmuxSession() {
+		// Start server first, then register on success
+		if err := m.startServerInBackground(port); err != nil {
+			return err
+		}
+		
+		// Register session only after successful server start
+		if err := m.registerSession(session); err != nil {
+			color.Yellow("Warning: Failed to register session: %v", err)
+		}
+		
+		// Update port mapping
+		if err := m.updatePortMapping(session); err != nil {
+			color.Yellow("Warning: Failed to update port mapping: %v", err)
+		}
+		
+		// Send invitations and display success
+		m.sendInvitationsAndDisplaySuccess(session, inviteUsers, tmuxSessionName, port, mode)
+		return nil
 	}
 
-	// Update port_sessions.db
+	// When not in tmux, create new session and set up sharing within it
+	color.Blue("🔗 Starting shared tmux session...")
+	
+	// Create the tmux session (or attach if it exists)
+	// First check if session already exists
+	checkCmd := exec.Command("tmux", "has-session", "-t", tmuxSessionName)
+	sessionExists := checkCmd.Run() == nil
+	
+	if !sessionExists {
+		createCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSessionName)
+		if err := createCmd.Run(); err != nil {
+			return fmt.Errorf("failed to create tmux session: %v", err)
+		}
+	}
+	
+	// Get current executable path
+	jmuxBinary, err := os.Executable()
+	if err != nil {
+		// Clean up tmux session on failure
+		exec.Command("tmux", "kill-session", "-t", tmuxSessionName).Run()
+		return fmt.Errorf("failed to get current executable path: %v", err)
+	}
+
+	// Build command arguments for internal server
+	var args []string
+	args = append(args, "_internal_jcat_server")
+	args = append(args, fmt.Sprintf("%d", port))
+	args = append(args, m.config.SetSizeScript)
+
+	// Add security flag if enabled
+	if m.config.Security.Enabled {
+		args = append(args, "--secure")
+	}
+
+	// Create the command string for tmux
+	cmdString := fmt.Sprintf("%s %s", jmuxBinary, strings.Join(args, " "))
+	
+	// Start the jcat server in a new tmux window within the session
+	tmuxCmd := exec.Command("tmux", "new-window", "-t", tmuxSessionName, "-d", "-n", "jcat-server", cmdString)
+	if err := tmuxCmd.Run(); err != nil {
+		// If window creation fails, clean up the session
+		exec.Command("tmux", "kill-session", "-t", tmuxSessionName).Run()
+		return fmt.Errorf("failed to start jcat server in tmux window: %v", err)
+	}
+
+	// Set up the menu key binding for this session
+	menuCommand := fmt.Sprintf("display-popup -E '%s menu'", jmuxBinary)
+	bindCmd := exec.Command("tmux", "bind-key", "-t", tmuxSessionName, "M", menuCommand)
+	bindCmd.Run() // Ignore errors for key binding
+
+	// Register session only after successful setup
+	if err := m.registerSession(session); err != nil {
+		color.Yellow("Warning: Failed to register session: %v", err)
+	}
+
+	// Update port mapping
 	if err := m.updatePortMapping(session); err != nil {
 		color.Yellow("Warning: Failed to update port mapping: %v", err)
 	}
 
-	// Send invitations
-	for _, user := range inviteUsers {
-		err := m.messaging.SendMessage(user, messaging.MessageTypeInvite, tmuxSessionName)
-		if err != nil {
-			color.Yellow("Failed to send invitation to %s: %v", user, err)
-		}
-	}
+	color.Green("🚀 jcat server started in tmux session (session-bound)")
+	color.Blue("💡 Use 'dmux stop' to stop sharing or Ctrl+A + M for menu")
 
-	// Display mode-specific message
-	var modeDesc string
-	switch mode {
-	case "view":
-		modeDesc = " (view-only mode)"
-	case "rogue":
-		modeDesc = " (rogue mode - independent control)"
-	default:
-		modeDesc = " (pair mode - shared control)"
-	}
-	color.Green("✓ Session '%s' shared on port %d%s", tmuxSessionName, port, modeDesc)
-	if len(inviteUsers) > 0 {
-		color.Cyan("📧 Invitations sent to: %s", strings.Join(inviteUsers, ", "))
-	}
+	// Send invitations and display success
+	m.sendInvitationsAndDisplaySuccess(session, inviteUsers, tmuxSessionName, port, mode)
 
-	// If already in tmux, just start the server
-	if m.isInTmuxSession() {
-		if m.config.Security.Enabled {
-			secureServer := jcat.NewSecureServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript, m.config.Security)
-			return secureServer.Start()
-		} else {
-			server := jcat.NewServer(fmt.Sprintf(":%d", port), m.config.SetSizeScript)
-			return server.Start()
-		}
+	// Attach to the session - this will block until tmux exits
+	// Only attach if we have a terminal available
+	if isTerminalAvailable() {
+		attachCmd := exec.Command("tmux", "attach-session", "-t", tmuxSessionName)
+		attachCmd.Stdin = os.Stdin
+		attachCmd.Stdout = os.Stdout
+		attachCmd.Stderr = os.Stderr
+		return attachCmd.Run()
+	} else {
+		color.Green("📋 Session sharing started in background")
+		color.Yellow("💡 Use 'tmux attach-session -t %s' to connect to the session", tmuxSessionName)
+		return nil
 	}
-
-	// Create wrapper script to start jcat server in background
-	jmuxBinary, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get current executable path: %v", err)
-	}
-	
-	// Get the directory containing the jmux-go binary
-	jmuxDir := filepath.Dir(jmuxBinary)
-	
-	wrapperScript := fmt.Sprintf(`#!/bin/bash
-# Add jmux-go binary directory to PATH
-export PATH="%s:$PATH"
-# Start jcat server in background
-%s _internal_jcat_server %d %s &
-# Start a shell
-exec $SHELL
-`, jmuxDir, jmuxBinary, port, m.config.SetSizeScript)
-
-	// Write wrapper script to temp file
-	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("jmux-wrapper-%d.sh", time.Now().UnixNano()))
-	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
-		return fmt.Errorf("failed to create wrapper script: %v", err)
-	}
-	defer os.Remove(wrapperPath) // Clean up on exit
-
-	// Start tmux with wrapper script (like bash version)
-	color.Blue("🔗 Starting shared tmux session...")
-	cmd := exec.Command("tmux", "new", "-A", "-s", tmuxSessionName, wrapperPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 // JoinSession joins an existing session
@@ -248,8 +275,31 @@ func (m *Manager) StopShare(sessionNames []string) error {
 		return nil
 	}
 
-	// If no specific sessions provided, stop all
+	// If no specific sessions provided, determine what to stop
 	if len(sessionNames) == 0 {
+		// If we're in a tmux session, only stop the current session
+		if os.Getenv("TMUX") != "" {
+			currentTmuxSession, err := m.getCurrentTmuxSession()
+			if err == nil {
+				// Find the shared session that matches the current tmux session
+				found := false
+				for _, session := range sessions {
+					if session.Name == currentTmuxSession {
+						color.Blue("🛑 Stopping sharing for current session '%s'", currentTmuxSession)
+						m.stopSession(session)
+						found = true
+						break
+					}
+				}
+				if !found {
+					color.Yellow("Current session '%s' is not being shared", currentTmuxSession)
+				}
+				return nil
+			}
+		}
+		
+		// If not in tmux or couldn't detect current session, stop all
+		color.Blue("🛑 Stopping all shared sessions")
 		for _, session := range sessions {
 			m.stopSession(session)
 		}
@@ -272,6 +322,32 @@ func (m *Manager) StopShare(sessionNames []string) error {
 	}
 
 	return nil
+}
+
+// sendInvitationsAndDisplaySuccess sends invitations and displays success message
+func (m *Manager) sendInvitationsAndDisplaySuccess(session *Session, inviteUsers []string, sessionName string, port int, mode string) {
+	// Send invitations to users
+	if len(inviteUsers) > 0 {
+		for _, user := range inviteUsers {
+			inviteMessage := fmt.Sprintf("You're invited to join dmux session '%s' at port %d (mode: %s)", sessionName, port, mode)
+			if m.messaging != nil {
+				if err := m.messaging.SendMessage(user, "INVITE", inviteMessage); err != nil {
+					color.Yellow("Warning: Failed to send invitation to %s: %v", user, err)
+				} else {
+					color.Green("📨 Invitation sent to %s", user)
+				}
+			}
+		}
+	}
+
+	// Display success message with connection details
+	color.Green("✅ Session '%s' is now being shared on port %d", sessionName, port)
+	if session.Private {
+		color.Yellow("🔒 Private session - only invited users can join")
+	} else {
+		color.Green("🌐 Public session - anyone can join")
+	}
+	color.Cyan("📞 Others can join with: dmux join %s %s", session.User, sessionName)
 }
 
 // ListSessions lists all active sessions
@@ -345,8 +421,69 @@ func (m *Manager) findAvailablePort() (int, error) {
 }
 
 func (m *Manager) isPortAvailable(port int) bool {
-	// Simple check by trying to bind to the port
+	// Check if port is in use by system
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("! lsof -i :%d", port))
+	if cmd.Run() != nil {
+		return false // Port is in use by system
+	}
+	
+	// Check if port is registered in dmux port mappings
+	if m.isPortInPortMappings(port) {
+		return false // Port is registered in dmux
+	}
+	
+	// Check if port is used by any active dmux sessions
+	if m.isPortInActiveSessions(port) {
+		return false // Port is used by active dmux session
+	}
+	
+	return true
+}
+
+// isPortInPortMappings checks if port is registered in port_sessions.db
+func (m *Manager) isPortInPortMappings(port int) bool {
+	portMappings, err := m.readPortMappings()
+	if err != nil {
+		return false // If we can't read, assume not in use
+	}
+	
+	for _, mapping := range portMappings {
+		parts := strings.Split(mapping, ":")
+		if len(parts) >= 1 {
+			if mappedPort := parts[0]; mappedPort == fmt.Sprintf("%d", port) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isPortInActiveSessions checks if port is used by any active session
+func (m *Manager) isPortInActiveSessions(port int) bool {
+	sessions, err := m.getAllSessions()
+	if err != nil {
+		return false // If we can't read, assume not in use
+	}
+	
+	for _, session := range sessions {
+		if session.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+// isTerminalAvailable checks if we have a terminal available for tmux attach
+func isTerminalAvailable() bool {
+	// Check if stdin is a terminal
+	return os.Getenv("TERM") != "" && isatty(os.Stdin.Fd())
+}
+
+// isatty checks if the file descriptor is a terminal
+func isatty(fd uintptr) bool {
+	// Simple check - try to get terminal size
+	cmd := exec.Command("stty", "size")
+	cmd.Stdin = os.NewFile(fd, "stdin")
 	return cmd.Run() == nil
 }
 
@@ -672,4 +809,199 @@ func (m *Manager) readPortMappings() ([]string, error) {
 	}
 	
 	return mappings, nil
+}
+
+// startServerInBackground starts the jcat server within the tmux session context
+func (m *Manager) startServerInBackground(port int) error {
+	// Get current tmux session name
+	currentSession, err := m.getCurrentTmuxSession()
+	if err != nil {
+		return fmt.Errorf("failed to get current tmux session: %v", err)
+	}
+
+	// Get current executable path
+	jmuxBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get current executable path: %v", err)
+	}
+
+	// Build command arguments for internal server
+	var args []string
+	args = append(args, "_internal_jcat_server")
+	args = append(args, fmt.Sprintf("%d", port))
+	args = append(args, m.config.SetSizeScript)
+
+	// Add security flag if enabled
+	if m.config.Security.Enabled {
+		args = append(args, "--secure")
+	}
+
+	// Create the command string for tmux
+	cmdString := fmt.Sprintf("%s %s", jmuxBinary, strings.Join(args, " "))
+	
+	// Start the jcat server in a new tmux window within the current session
+	// This ensures the server dies when the session is killed
+	tmuxCmd := exec.Command("tmux", "new-window", "-t", currentSession, "-d", "-n", "jcat-server", cmdString)
+	
+	if err := tmuxCmd.Run(); err != nil {
+		return fmt.Errorf("failed to start jcat server in tmux window: %v", err)
+	}
+
+	color.Green("🚀 jcat server started in tmux session (session-bound)")
+	color.Blue("💡 Use 'dmux stop' to stop sharing or Ctrl+A + M for menu")
+	
+	// Set up the menu key binding
+	if err := m.setupMenuKeyBinding(); err != nil {
+		color.Yellow("Warning: Could not set up menu key binding: %v", err)
+	}
+	
+	return nil
+}
+
+// getCurrentTmuxSession gets the current tmux session name
+func (m *Manager) getCurrentTmuxSession() (string, error) {
+	cmd := exec.Command("tmux", "display-message", "-p", "#S")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// setupMenuKeyBinding sets up the Ctrl+A + M key binding for the dmux menu
+func (m *Manager) setupMenuKeyBinding() error {
+	// Get current executable path
+	jmuxBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get current executable path: %v", err)
+	}
+
+	// Create the menu command
+	menuCommand := fmt.Sprintf("display-popup -E '%s menu'", jmuxBinary)
+	
+	// Set up the key binding: Ctrl+A + M
+	cmd := exec.Command("tmux", "bind-key", "M", menuCommand)
+	
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to set up menu key binding: %v", err)
+	}
+	
+	return nil
+}
+
+// StartReverseShare starts reverse sharing - client listens for connections from hosts
+func (m *Manager) StartReverseShare(inviteUsers []string, password string, private bool, mode string) error {
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		return fmt.Errorf("unable to determine current user")
+	}
+
+	// Find an available port
+	port, err := m.findAvailablePort()
+	if err != nil {
+		return fmt.Errorf("no available ports: %v", err)
+	}
+
+	// Create reverse share session
+	session := &Session{
+		User:         currentUser,
+		Name:         fmt.Sprintf("reverse-%d", time.Now().Unix()),
+		Port:         port,
+		Started:      time.Now().Unix(),
+		Private:      private,
+		AllowedUsers: inviteUsers,
+		Mode:         mode,
+		IsReverse:    true, // Mark as reverse sharing
+	}
+
+	// Set default mode if empty
+	if session.Mode == "" {
+		session.Mode = "pair"
+	}
+
+	// Register the reverse session
+	if err := m.registerSession(session); err != nil {
+		return fmt.Errorf("failed to register reverse session: %v", err)
+	}
+
+	color.Green("🔄 Starting reverse sharing session '%s'", session.Name)
+	color.Blue("🎯 Listening on port %d for incoming connections", port)
+
+	// Start listening server in background
+	go func() {
+		if err := m.startReverseListener(session); err != nil {
+			color.Red("❌ Reverse sharing server error: %v", err)
+		}
+	}()
+
+	// Send invitation messages to users
+	m.sendReverseInvitations(session, inviteUsers, password)
+
+	color.Green("✅ Reverse sharing started - waiting for connections")
+	color.Yellow("💡 Invited users can join with: dmux join %s", currentUser)
+	color.Blue("🛑 Use 'dmux stop %s' to stop reverse sharing", session.Name)
+
+	return nil
+}
+
+// startReverseListener starts the listening server for reverse sharing
+func (m *Manager) startReverseListener(session *Session) error {
+	// This would start a jcat server that waits for connections
+	// When someone connects, instead of sharing the local session,
+	// we request their session to be shared with us
+	
+	// For now, start a simple server that handles the reverse connection
+	server := jcat.NewServer(fmt.Sprintf(":%d", session.Port), m.config.SetSizeScript)
+	return server.Start()
+}
+
+// sendReverseInvitations sends invitation messages for reverse sharing
+func (m *Manager) sendReverseInvitations(session *Session, users []string, password string) {
+	currentUser := os.Getenv("USER")
+	hostname, _ := os.Hostname()
+	
+	for _, user := range users {
+		user = strings.TrimSpace(user)
+		if user == "" {
+			continue
+		}
+
+		// Create invitation message
+		timestamp := time.Now().Unix()
+		filename := fmt.Sprintf("%s_reverse_invite_%d.msg", user, timestamp)
+		filepath := filepath.Join(m.config.SharedDir, "messages", filename)
+
+		var content string
+		if password != "" {
+			content = fmt.Sprintf(`FROM=%s
+TYPE=REVERSE_INVITE
+TIMESTAMP=%d
+SESSION=%s
+PORT=%d
+HOSTNAME=%s
+PASSWORD_PROTECTED=true
+PRIVATE=%t
+MODE=%s
+DATA=%s is requesting to share a session with you (password protected)
+PRIORITY=high`, currentUser, timestamp, session.Name, session.Port, hostname, session.Private, session.Mode, currentUser)
+		} else {
+			content = fmt.Sprintf(`FROM=%s
+TYPE=REVERSE_INVITE
+TIMESTAMP=%d
+SESSION=%s
+PORT=%d
+HOSTNAME=%s
+PASSWORD_PROTECTED=false
+PRIVATE=%t
+MODE=%s
+DATA=%s is requesting to share a session with you
+PRIORITY=high`, currentUser, timestamp, session.Name, session.Port, hostname, session.Private, session.Mode, currentUser)
+		}
+
+		if err := os.WriteFile(filepath, []byte(content), 0644); err != nil {
+			color.Yellow("⚠️  Could not send invitation to %s: %v", user, err)
+		} else {
+			color.Green("📨 Invitation sent to %s", user)
+		}
+	}
 }

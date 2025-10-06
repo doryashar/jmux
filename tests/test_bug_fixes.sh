@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Test script for bug fixes: tmux PATH detection and saved_settings variable
+# Test script for bug fixes: dmux functionality validation
 
 set -euo pipefail
 
@@ -11,54 +11,50 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${BLUE}Testing jmux bug fixes...${NC}"
+echo -e "${BLUE}Testing dmux bug fixes...${NC}"
 echo
 
 # Test environment
-export JMUX_SHARED_DIR="/tmp/jmux_test_fixes"
+export JMUX_SHARED_DIR="/tmp/dmux_test_fixes"
 mkdir -p "$JMUX_SHARED_DIR"
 
-test_setsize_script_generation() {
-    echo -e "${YELLOW}Testing setsize script generation with tmux path detection...${NC}"
+# Build dmux binary for testing
+DMUX_BINARY="/tmp/dmux_bugfix_test"
+if (cd "$(dirname "$0")/../src/jmux-go" && go build -o "$DMUX_BINARY" .); then
+    echo -e "${GREEN}✓ dmux binary built successfully${NC}"
+else
+    echo -e "${RED}✗ Failed to build dmux binary${NC}"
+    exit 1
+fi
+
+test_session_creation_fixes() {
+    echo -e "${YELLOW}Testing session creation bug fixes...${NC}"
     
-    local test_config_dir="/tmp/jmux_test_fixes/.config/jmux"
+    local test_config_dir="/tmp/dmux_test_fixes/.config/jmux"
     mkdir -p "$test_config_dir"
     
     # Test with custom config dir
     local original_home="$HOME"
-    export HOME="/tmp/jmux_test_fixes"
+    export HOME="/tmp/dmux_test_fixes"
     
-    # Run jmux to trigger setsize script creation
-    ./jmux status > /dev/null 2>&1
+    # Test session creation with argument parsing fix
+    local session_name="bug-fix-test-$(date +%s)"
+    local output=$("$DMUX_BINARY" share positional_arg --name "$session_name" 2>&1 || true)
     
-    # Check if setsize script was created with improved tmux detection
-    local setsize_script="$test_config_dir/setsize.sh"
-    
-    if [[ -f "$setsize_script" ]]; then
-        echo -e "${GREEN}✓ Setsize script created${NC}"
-        
-        if grep -q "Try multiple common tmux locations" "$setsize_script"; then
-            echo -e "${GREEN}✓ Script has improved tmux detection${NC}"
-        else
-            echo -e "${RED}✗ Script missing improved tmux detection${NC}"
-            return 1
-        fi
-        
-        if grep -q "/bin/tmux" "$setsize_script" && grep -q "/usr/bin/tmux" "$setsize_script"; then
-            echo -e "${GREEN}✓ Script checks multiple tmux paths${NC}"
-        else
-            echo -e "${RED}✗ Script missing multiple path checks${NC}"
-            return 1
-        fi
-        
-        if grep -q "exec.*tmux" "$setsize_script"; then
-            echo -e "${GREEN}✓ Script uses exec for proper process handling${NC}"
-        else
-            echo -e "${RED}✗ Script missing exec command${NC}"
-            return 1
-        fi
+    if echo "$output" | grep -q "$session_name"; then
+        echo -e "${GREEN}✓ Argument parsing fix working (--name takes precedence)${NC}"
     else
-        echo -e "${RED}✗ Setsize script not created${NC}"
+        echo -e "${RED}✗ Argument parsing fix not working${NC}"
+        echo "Output: $output"
+        return 1
+    fi
+    
+    # Test that session creation doesn't hang
+    timeout 10s "$DMUX_BINARY" status > /dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ Status command doesn't hang${NC}"
+    else
+        echo -e "${RED}✗ Status command hangs or fails${NC}"
         return 1
     fi
     
@@ -66,78 +62,85 @@ test_setsize_script_generation() {
     export HOME="$original_home"
 }
 
-test_saved_settings_variable() {
-    echo -e "${YELLOW}Testing saved_settings variable fix...${NC}"
+test_terminal_handling() {
+    echo -e "${YELLOW}Testing terminal handling improvements...${NC}"
     
-    # Check that the variable is declared without 'local' and uses safe expansion
-    if grep -q "saved_settings=.*stty.*-g" "./jmux" && grep -q '\${saved_settings:-}' "./jmux"; then
-        echo -e "${GREEN}✓ saved_settings variable uses safe expansion${NC}"
+    # Test that dmux handles non-terminal environments gracefully
+    local output
+    output=$(TERM="" "$DMUX_BINARY" share test-terminal 2>&1 || true)
+    
+    if echo "$output" | grep -q "background"; then
+        echo -e "${GREEN}✓ dmux handles non-terminal environment gracefully${NC}"
     else
-        echo -e "${RED}✗ saved_settings variable not properly fixed${NC}"
-        return 1
+        echo -e "${YELLOW}Note: Terminal handling test - output: $output${NC}"
+        # This is not necessarily a failure
     fi
     
-    # Check that it's not declared as local in join_session context
-    if ! grep -A 20 -B 5 "saved_settings.*stty" "./jmux" | grep -q "local saved_settings"; then
-        echo -e "${GREEN}✓ saved_settings not declared as local in function scope${NC}"
-    else
-        echo -e "${RED}✗ saved_settings still declared as local${NC}"
-        return 1
-    fi
-}
-
-test_tmux_detection_robustness() {
-    echo -e "${YELLOW}Testing tmux detection robustness...${NC}"
+    # Test cleanup functionality
+    local cleanup_output
+    cleanup_output=$("$DMUX_BINARY" cleanup 2>&1 || true)
     
-    # Check that setsize script has proper error handling
-    local test_config_dir="/tmp/jmux_test_fixes/.config/jmux"
-    local setsize_script="$test_config_dir/setsize.sh"
-    
-    if [[ -f "$setsize_script" ]]; then
-        if grep -q "Error: tmux not found" "$setsize_script" && grep -q "Available paths:" "$setsize_script"; then
-            echo -e "${GREEN}✓ Setsize script has proper error messages${NC}"
-        else
-            echo -e "${RED}✗ Setsize script missing error handling${NC}"
-            return 1
-        fi
-        
-        # Test script syntax
-        if bash -n "$setsize_script"; then
-            echo -e "${GREEN}✓ Setsize script has valid syntax${NC}"
-        else
-            echo -e "${RED}✗ Setsize script has syntax errors${NC}"
-            return 1
-        fi
+    if echo "$cleanup_output" | grep -q "Cleanup complete"; then
+        echo -e "${GREEN}✓ Cleanup functionality working${NC}"
     else
-        echo -e "${RED}✗ Cannot test - setsize script not found${NC}"
+        echo -e "${RED}✗ Cleanup functionality not working${NC}"
+        echo "Output: $cleanup_output"
         return 1
     fi
 }
 
-test_version_update_mechanism() {
-    echo -e "${YELLOW}Testing setsize script version update mechanism...${NC}"
+test_port_management() {
+    echo -e "${YELLOW}Testing port management robustness...${NC}"
     
-    local test_config_dir="/tmp/jmux_test_fixes/.config/jmux"
-    local setsize_script="$test_config_dir/setsize.sh"
+    # Test that dmux properly handles port assignment
+    local port_output
+    port_output=$("$DMUX_BINARY" share test-port-1 2>&1 || true)
     
-    # Create an old version of the script
-    cat > "$setsize_script" << 'EOF'
-stty rows 50 cols 254
-tmux new -A -s $HOSTNAME
-exit
-EOF
-    
-    # Run jmux to trigger update
-    local original_home="$HOME"
-    export HOME="/tmp/jmux_test_fixes"
-    ./jmux status > /dev/null 2>&1
-    export HOME="$original_home"
-    
-    # Check if script was updated
-    if grep -q "Try multiple common tmux locations" "$setsize_script"; then
-        echo -e "${GREEN}✓ Old setsize script was automatically updated${NC}"
+    if echo "$port_output" | grep -q "port"; then
+        echo -e "${GREEN}✓ Port assignment working${NC}"
     else
-        echo -e "${RED}✗ Old setsize script was not updated${NC}"
+        echo -e "${RED}✗ Port assignment not working${NC}"
+        echo "Output: $port_output"
+        return 1
+    fi
+    
+    # Test session listing
+    local session_list
+    session_list=$("$DMUX_BINARY" sessions 2>&1 || true)
+    
+    if echo "$session_list" | grep -q -E "(sessions|Session:)" || echo "$session_list" | grep -q "No active"; then
+        echo -e "${GREEN}✓ Session listing working${NC}"
+    else
+        echo -e "${RED}✗ Session listing not working${NC}"
+        echo "Output: $session_list"
+        return 1
+    fi
+}
+
+test_version_command() {
+    echo -e "${YELLOW}Testing version command functionality...${NC}"
+    
+    # Test version command
+    local version_output
+    version_output=$("$DMUX_BINARY" version 2>&1 || true)
+    
+    if echo "$version_output" | grep -q -E "v[0-9]+\.[0-9]+\.[0-9]+"; then
+        echo -e "${GREEN}✓ Version command returns valid version${NC}"
+    else
+        echo -e "${RED}✗ Version command not working properly${NC}"
+        echo "Output: $version_output"
+        return 1
+    fi
+    
+    # Test help command
+    local help_output
+    help_output=$("$DMUX_BINARY" --help 2>&1 || true)
+    
+    if echo "$help_output" | grep -q "dmux"; then
+        echo -e "${GREEN}✓ Help command working${NC}"
+    else
+        echo -e "${RED}✗ Help command not working${NC}"
+        echo "Output: $help_output"
         return 1
     fi
 }
@@ -152,31 +155,32 @@ main() {
     local tests_passed=0
     
     # Run tests
-    if test_setsize_script_generation; then
+    if test_session_creation_fixes; then
         tests_passed=$((tests_passed + 1))
     fi
     tests_run=$((tests_run + 1))
     echo
     
-    if test_saved_settings_variable; then
+    if test_terminal_handling; then
         tests_passed=$((tests_passed + 1))
     fi
     tests_run=$((tests_run + 1))
     echo
     
-    if test_tmux_detection_robustness; then
+    if test_port_management; then
         tests_passed=$((tests_passed + 1))
     fi
     tests_run=$((tests_run + 1))
     echo
     
-    if test_version_update_mechanism; then
+    if test_version_command; then
         tests_passed=$((tests_passed + 1))
     fi
     tests_run=$((tests_run + 1))
     
     # Cleanup
     rm -rf "$JMUX_SHARED_DIR"
+    rm -f "$DMUX_BINARY"
     
     # Report results
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

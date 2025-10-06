@@ -10,32 +10,41 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}Testing jmux graceful degradation without inotify-tools...${NC}"
+echo -e "${BLUE}Testing dmux graceful degradation without inotify-tools...${NC}"
 echo
 
+# Build dmux binary for testing
+DMUX_BINARY="/tmp/dmux_graceful_test"
+if (cd "$(dirname "$0")/../src/jmux-go" && go build -o "$DMUX_BINARY" .); then
+    echo "✓ dmux binary built successfully"
+else
+    echo "❌ Failed to build dmux binary"
+    exit 1
+fi
+
 # Setup test environment
-TEST_DIR="/tmp/jmux_graceful_test"
+TEST_DIR="/tmp/dmux_graceful_test_env"
 export JMUX_SHARED_DIR="${TEST_DIR}"
 
 echo -e "${YELLOW}Setting up test environment...${NC}"
 mkdir -p "${TEST_DIR}"/{messages,sessions}
 touch "${TEST_DIR}/users.db"
 
-echo -e "${YELLOW}Testing jmux status (should show fallback messaging)...${NC}"
-./jmux status
+echo -e "${YELLOW}Testing dmux status (should show fallback messaging)...${NC}"
+"$DMUX_BINARY" status
 echo
 
-echo -e "${YELLOW}Testing message watcher status...${NC}"
-./jmux watch status
+echo -e "${YELLOW}Testing message monitor status...${NC}"
+"$DMUX_BINARY" monitor status
 echo
 
 echo -e "${YELLOW}Testing help command...${NC}"
-./jmux help | head -5
+"$DMUX_BINARY" --help | head -5 || true
 echo
 
 echo -e "${YELLOW}Testing message sending (should work without real-time)...${NC}"
 echo "testuser:192.168.1.100:$(date +%s)" >> "${TEST_DIR}/users.db"
-./jmux msg testuser message "Test message without real-time"
+"$DMUX_BINARY" msg testuser "Test message without real-time"
 echo
 
 echo -e "${YELLOW}Checking message was created...${NC}"
@@ -48,7 +57,8 @@ else
 fi
 
 echo
-echo -e "${GREEN}✓ All tests completed - jmux works without inotify-tools!${NC}"
+echo -e "${GREEN}✓ All tests completed - dmux works without inotify-tools!${NC}"
 
 # Cleanup
-rm -rf "${TEST_DIR}"
+rm -rf "${TEST_DIR}" 2>/dev/null || true
+rm -f "$DMUX_BINARY"

@@ -6,11 +6,15 @@ set -e
 echo "🧪 Testing dmux sharing modes"
 echo "=============================="
 
-export JMUX_SHARED_DIR="$HOME/.jmux/shared"
-DMUX_BIN="$(pwd)/bin/dmux"
+export JMUX_SHARED_DIR="/tmp/dmux_sharing_test"
+mkdir -p "$JMUX_SHARED_DIR"
 
-if [ ! -f "$DMUX_BIN" ]; then
-    echo "❌ dmux binary not found at $DMUX_BIN"
+# Build dmux binary for testing  
+DMUX_BIN="/tmp/dmux_sharing_test_binary"
+if (cd "$(dirname "$0")/../src/jmux-go" && go build -o "$DMUX_BIN" .); then
+    echo "✓ dmux binary built successfully"
+else
+    echo "❌ Failed to build dmux binary"
     exit 1
 fi
 
@@ -79,6 +83,11 @@ echo "  All flag validation tests passed!"
 
 echo ""
 echo "🎉 All automated tests passed!"
+
+# Cleanup
+rm -f "$DMUX_BIN"
+rm -rf "$JMUX_SHARED_DIR"
+
 echo ""
 echo "📝 Manual testing required:"
 echo "   1. Start a tmux session and test: dmux share --view"

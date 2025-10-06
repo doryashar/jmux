@@ -64,6 +64,16 @@ Examples:
 			} else {
 				color.Blue("✓ No stale sessions found")
 			}
+			
+			// Also clean up stale port mappings
+			color.Blue("🔌 Cleaning up stale port mappings...")
+			portsCleaned := performPortMappingCleanup()
+			if portsCleaned > 0 {
+				color.Green("✓ Cleaned up %d stale port mapping(s)", portsCleaned)
+				totalCleaned += portsCleaned
+			} else {
+				color.Blue("✓ No stale port mappings found")
+			}
 		}
 
 		if totalCleaned > 0 {
@@ -268,4 +278,78 @@ type sessionData struct {
 	Name string
 	Port int
 	PID  int
+}
+
+// performPortMappingCleanup removes stale port mappings and returns count of cleaned entries
+func performPortMappingCleanup() int {
+	if cfg == nil {
+		return 0
+	}
+
+	portMapFile := cfg.PortMapFile
+	if portMapFile == "" {
+		portMapFile = filepath.Join(cfg.ConfigDir, "port_sessions.db")
+	}
+
+	// Read current port mappings
+	content, err := os.ReadFile(portMapFile)
+	if err != nil {
+		return 0 // File doesn't exist or can't be read
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	var validMappings []string
+	cleaned := 0
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse port mapping: format is "port:user:session"
+		parts := strings.Split(line, ":")
+		if len(parts) < 3 {
+			continue // Invalid format, skip
+		}
+
+		port, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue // Invalid port, skip
+		}
+
+		// Check if this port mapping is still valid
+		if isPortMappingValid(port, parts[1], parts[2]) {
+			validMappings = append(validMappings, line)
+		} else {
+			color.Yellow("🗑️  Removing stale port mapping: %s", line)
+			cleaned++
+		}
+	}
+
+	// Write back only valid mappings
+	newContent := strings.Join(validMappings, "\n")
+	if len(validMappings) > 0 {
+		newContent += "\n"
+	}
+
+	if err := os.WriteFile(portMapFile, []byte(newContent), 0644); err != nil {
+		color.Yellow("⚠️  Warning: failed to update port mappings file: %v", err)
+		return 0
+	}
+
+	return cleaned
+}
+
+// isPortMappingValid checks if a port mapping is still valid (port in use by jcat server)
+func isPortMappingValid(port int, user, session string) bool {
+	// Check if port is still in use
+	if !isPortInUse(port) {
+		return false
+	}
+
+	// Check if the specific jcat server process is running on this port
+	cmd := exec.Command("pgrep", "-f", fmt.Sprintf("_internal_jcat_server %d", port))
+	err := cmd.Run()
+	return err == nil // If pgrep succeeds, the specific jcat server is running
 }

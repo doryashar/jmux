@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -73,7 +74,67 @@ Features:
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() error {
-	return rootCmd.Execute()
+	// Set up unknown command handler for tmux passthrough
+	rootCmd.SetArgs(os.Args[1:])
+	
+	// Temporarily disable error output for unknown commands
+	originalSilenceErrors := rootCmd.SilenceErrors
+	originalSilenceUsage := rootCmd.SilenceUsage
+	
+	// Try to execute the command with silenced errors
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
+	err := rootCmd.Execute()
+	
+	// Restore original settings
+	rootCmd.SilenceErrors = originalSilenceErrors
+	rootCmd.SilenceUsage = originalSilenceUsage
+	
+	// If we get a "unknown command" error, try tmux passthrough
+	if err != nil && isUnknownCommandError(err) {
+		// Initialize system for monitoring before passthrough
+		if cfg == nil {
+			initializeSystem()
+		}
+		
+		// Pass through to tmux (no error message shown)
+		return handleTmuxPassthrough(os.Args[1:])
+	}
+	
+	// For other errors, show them normally
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	}
+	
+	return err
+}
+
+// isUnknownCommandError checks if the error is due to an unknown command
+func isUnknownCommandError(err error) bool {
+	return err != nil && 
+		   (strings.Contains(err.Error(), "unknown command") ||
+		    strings.Contains(err.Error(), "invalid command"))
+}
+
+// handleTmuxPassthrough passes unknown commands through to tmux
+func handleTmuxPassthrough(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("no command provided")
+	}
+	
+	// Check if tmux is available
+	if tmuxMgr == nil {
+		tmuxMgr = tmux.NewManager()
+	}
+	
+	if !tmuxMgr.IsTmuxAvailable() {
+		return fmt.Errorf("tmux is not available. Please install tmux first")
+	}
+	
+	// Silently pass through to tmux without notification
+	
+	// Use the tmux manager to run the command
+	return tmuxMgr.RunTmuxCommand(args)
 }
 
 func init() {

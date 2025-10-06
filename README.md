@@ -341,3 +341,16 @@ This project is provided as-is for internal use.
 [ ]   host commands: kick / Ban user
 [ ]   client commands: leave / switch to another remote-session / rename
 [ ]   Secure connection: Password / ssl key / encryption
+
+[ ] Go over all tests and fix them
+[ ] Create regression file to run all tests. whenever there's a new test add it to regression
+[ ] Validate password
+[ ] Validate client+host menu and security
+[ ] Validate kick / invite / leave
+[ ] Validate rogue mode
+[ ] Validate encryption pass
+[ ] Validate - jcat/dmux should also support reverse for client. when client is running dmux ask-share [users] client is starting to listen for connection. host is getting notification message and when host is connecting to the client then sharing its session.
+
+when host detach the sharing is done - why?
+if running share with name but the session name exists. if this session is not in share make it share. if no name was given a new session should be created
+if there are more than one ips, write them all in the sessions file so that connecting clients will try one by one
