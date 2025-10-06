@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -504,6 +506,13 @@ MODE=%s
 	return os.WriteFile(filePath, []byte(content), 0644)
 }
 
+// unregisterSession removes a session registration
+func (m *Manager) unregisterSession(session *Session) error {
+	fileName := fmt.Sprintf("%s_%s.session", session.User, session.Name)
+	filePath := filepath.Join(m.config.SessionsDir, fileName)
+	return os.Remove(filePath)
+}
+
 func (m *Manager) findUserSession(user, sessionName string) (*Session, error) {
 	sessions, err := m.ListUserSessions(user)
 	if err != nil {
@@ -927,31 +936,44 @@ func (m *Manager) StartReverseShare(inviteUsers []string, password string, priva
 	color.Green("🔄 Starting reverse sharing session '%s'", session.Name)
 	color.Blue("🎯 Listening on port %d for incoming connections", port)
 
-	// Start listening server in background
-	go func() {
-		if err := m.startReverseListener(session); err != nil {
-			color.Red("❌ Reverse sharing server error: %v", err)
-		}
-	}()
-
-	// Send invitation messages to users
+	// Send invitation messages to users first
 	m.sendReverseInvitations(session, inviteUsers, password)
 
 	color.Green("✅ Reverse sharing started - waiting for connections")
 	color.Yellow("💡 Invited users can join with: dmux join-share %s", currentUser)
 	color.Blue("🛑 Use 'dmux stop %s' to stop reverse sharing", session.Name)
 
+	// Keep the process alive by waiting for signals or connections
+	return m.waitForReverseConnections(session)
+}
+
+// waitForReverseConnections keeps the process alive and waits for reverse sharing connections
+func (m *Manager) waitForReverseConnections(session *Session) error {
+	// Set up signal handling to gracefully exit
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+
+	// Start a simple TCP listener that waits for reverse connections
+	go func() {
+		if err := m.startSimpleReverseListener(session); err != nil {
+			color.Red("❌ Reverse sharing server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-signalChan
+	color.Yellow("\n🛑 Reverse sharing stopped")
+	
+	// Clean up session registration
+	m.unregisterSession(session)
+	
 	return nil
 }
 
-// startReverseListener starts the listening server for reverse sharing
-func (m *Manager) startReverseListener(session *Session) error {
-	// This would start a jcat server that waits for connections
-	// When someone connects, instead of sharing the local session,
-	// we request their session to be shared with us
-	
-	// For now, start a simple server that handles the reverse connection
-	// Bind to all interfaces (0.0.0.0) so it's accessible from other machines
+// startSimpleReverseListener starts a TCP listener for reverse sharing connections
+func (m *Manager) startSimpleReverseListener(session *Session) error {
+	// Start a jcat server that will handle incoming connections
+	// Bind to all interfaces so it's accessible from other machines
 	server := jcat.NewServer(fmt.Sprintf("0.0.0.0:%d", session.Port), m.config.SetSizeScript)
 	return server.Start()
 }

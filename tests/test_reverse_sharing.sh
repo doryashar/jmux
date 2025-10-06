@@ -274,6 +274,40 @@ test_join_share_no_invitation() {
     fi
 }
 
+test_ask_share_process_persistence() {
+    echo -e "${YELLOW}Testing ask-share process persistence...${NC}"
+    
+    # Start ask-share in background with timeout
+    timeout 5s "$DMUX_BINARY" ask-share testuser99 >/dev/null 2>&1 &
+    local ask_share_pid=$!
+    
+    # Give it time to start up
+    sleep 2
+    
+    # Check if process is still running
+    if ps -p $ask_share_pid > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ ask-share process stays alive${NC}"
+        
+        # Check if port is listening
+        local port_found=$(ss -tlnp 2>/dev/null | grep ":123[0-9][0-9]" | wc -l)
+        if [[ $port_found -gt 0 ]]; then
+            echo -e "${GREEN}✓ jcat server is listening on network port${NC}"
+            # Kill the background process
+            kill $ask_share_pid 2>/dev/null
+            wait $ask_share_pid 2>/dev/null || true
+            return 0
+        else
+            echo -e "${RED}✗ jcat server not listening on any port${NC}"
+            kill $ask_share_pid 2>/dev/null
+            wait $ask_share_pid 2>/dev/null || true
+            return 1
+        fi
+    else
+        echo -e "${RED}✗ ask-share process exited too early${NC}"
+        return 1
+    fi
+}
+
 # Main test execution
 main() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -287,7 +321,7 @@ main() {
     for test_func in test_ask_share_help test_ask_share_no_users test_ask_share_invalid_mode \
                      test_ask_share_basic test_ask_share_message_content test_ask_share_session_registration \
                      test_ask_share_private_mode test_ask_share_multiple_modes \
-                     test_join_share_help test_join_share_no_invitation; do
+                     test_join_share_help test_join_share_no_invitation test_ask_share_process_persistence; do
         if $test_func; then
             tests_passed=$((tests_passed + 1))
         fi
