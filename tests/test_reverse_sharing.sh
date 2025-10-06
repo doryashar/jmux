@@ -237,6 +237,43 @@ test_ask_share_multiple_modes() {
     fi
 }
 
+test_join_share_help() {
+    echo -e "${YELLOW}Testing join-share help command...${NC}"
+    
+    local output=$("$DMUX_BINARY" join-share --help 2>&1)
+    
+    if echo "$output" | grep -q "Join a reverse sharing session" && \
+       echo "$output" | grep -q "respond to reverse sharing invitations" && \
+       echo "$output" | grep -q "ask-share" && \
+       echo "$output" | grep -q "view" && \
+       echo "$output" | grep -q "rogue"; then
+        echo -e "${GREEN}✓ join-share help shows correct information${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ join-share help missing expected content${NC}"
+        echo "Output: $output"
+        return 1
+    fi
+}
+
+test_join_share_no_invitation() {
+    echo -e "${YELLOW}Testing join-share with no invitation...${NC}"
+    
+    # Clean any existing messages first
+    rm -f "$JMUX_SHARED_DIR/messages"/*reverse_invite*
+    
+    local output=$("$DMUX_BINARY" join-share nonexistentuser 2>&1)
+    
+    if echo "$output" | grep -q "no reverse sharing invitation found"; then
+        echo -e "${GREEN}✓ join-share correctly handles missing invitations${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ join-share should detect missing invitations${NC}"
+        echo "Output: $output"
+        return 1
+    fi
+}
+
 # Main test execution
 main() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -249,7 +286,8 @@ main() {
     # Run all tests
     for test_func in test_ask_share_help test_ask_share_no_users test_ask_share_invalid_mode \
                      test_ask_share_basic test_ask_share_message_content test_ask_share_session_registration \
-                     test_ask_share_private_mode test_ask_share_multiple_modes; do
+                     test_ask_share_private_mode test_ask_share_multiple_modes \
+                     test_join_share_help test_join_share_no_invitation; do
         if $test_func; then
             tests_passed=$((tests_passed + 1))
         fi

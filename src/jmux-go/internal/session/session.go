@@ -938,7 +938,7 @@ func (m *Manager) StartReverseShare(inviteUsers []string, password string, priva
 	m.sendReverseInvitations(session, inviteUsers, password)
 
 	color.Green("✅ Reverse sharing started - waiting for connections")
-	color.Yellow("💡 Invited users can join with: dmux join %s", currentUser)
+	color.Yellow("💡 Invited users can join with: dmux join-share %s", currentUser)
 	color.Blue("🛑 Use 'dmux stop %s' to stop reverse sharing", session.Name)
 
 	return nil
@@ -951,7 +951,8 @@ func (m *Manager) startReverseListener(session *Session) error {
 	// we request their session to be shared with us
 	
 	// For now, start a simple server that handles the reverse connection
-	server := jcat.NewServer(fmt.Sprintf(":%d", session.Port), m.config.SetSizeScript)
+	// Bind to all interfaces (0.0.0.0) so it's accessible from other machines
+	server := jcat.NewServer(fmt.Sprintf("0.0.0.0:%d", session.Port), m.config.SetSizeScript)
 	return server.Start()
 }
 
@@ -1004,4 +1005,175 @@ PRIORITY=high`, currentUser, timestamp, session.Name, session.Port, hostname, se
 			color.Green("📨 Invitation sent to %s", user)
 		}
 	}
+}
+
+// JoinReverseShare joins a reverse sharing session by reading invitation messages
+func (m *Manager) JoinReverseShare(hostUser, sessionName string, modeOverride string, password string) error {
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		return fmt.Errorf("unable to determine current user")
+	}
+
+	// Find reverse invitation message
+	invitation, err := m.findReverseInvitation(hostUser, sessionName)
+	if err != nil {
+		return fmt.Errorf("no reverse sharing invitation found from %s: %v", hostUser, err)
+	}
+
+	// Check permissions for private sessions
+	if invitation.Private && !m.isUserAllowed(currentUser, invitation.AllowedUsers) {
+		return fmt.Errorf("access denied: private session")
+	}
+
+	// Determine the actual mode to use (override takes precedence)
+	actualMode := invitation.Mode
+	if modeOverride != "" {
+		actualMode = modeOverride
+	}
+
+	// If no mode is set in invitation (backward compatibility), default to pair
+	if actualMode == "" {
+		actualMode = "pair"
+	}
+
+	// Display mode-specific connection message
+	var modeDesc string
+	switch actualMode {
+	case "view":
+		modeDesc = " in view-only mode (read-only)"
+	case "rogue":
+		modeDesc = " in rogue mode (independent control)"
+	default:
+		modeDesc = " in pair mode (shared control)"
+	}
+
+	color.Blue("🔗 Connecting to %s's reverse sharing session (%s) at %s:%d%s...", 
+		hostUser, invitation.SessionName, invitation.HostIP, invitation.Port, modeDesc)
+	color.Yellow("Press Ctrl+C to disconnect")
+
+	// Connect using jcat client
+	client := jcat.NewClientWithMode(fmt.Sprintf("%s:%d", invitation.HostIP, invitation.Port), actualMode)
+	return client.Connect()
+}
+
+// ReverseInvitation represents a reverse sharing invitation
+type ReverseInvitation struct {
+	From               string
+	SessionName        string
+	Port               int
+	HostIP             string
+	PasswordProtected  bool
+	Private            bool
+	Mode               string
+	AllowedUsers       []string
+	Timestamp          int64
+}
+
+// findReverseInvitation finds a reverse sharing invitation message
+func (m *Manager) findReverseInvitation(hostUser, sessionName string) (*ReverseInvitation, error) {
+	currentUser := os.Getenv("USER")
+	messagesDir := filepath.Join(m.config.SharedDir, "messages")
+
+	// Pattern to match reverse invitation messages for current user
+	pattern := fmt.Sprintf("%s_reverse_invite_*.msg", currentUser)
+	matches, err := filepath.Glob(filepath.Join(messagesDir, pattern))
+	if err != nil {
+		return nil, fmt.Errorf("failed to search for invitation messages: %v", err)
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no reverse sharing invitations found")
+	}
+
+	// Find the most recent invitation from the specified host user
+	var latestInvitation *ReverseInvitation
+	var latestTimestamp int64
+
+	for _, msgFile := range matches {
+		invitation, err := m.parseReverseInvitation(msgFile)
+		if err != nil {
+			continue // Skip invalid messages
+		}
+
+		// Check if it's from the right host user
+		if invitation.From != hostUser {
+			continue
+		}
+
+		// Check if session name matches (if specified)
+		if sessionName != "" && invitation.SessionName != sessionName {
+			continue
+		}
+
+		// Use the most recent invitation
+		if invitation.Timestamp > latestTimestamp {
+			latestInvitation = invitation
+			latestTimestamp = invitation.Timestamp
+		}
+	}
+
+	if latestInvitation == nil {
+		if sessionName != "" {
+			return nil, fmt.Errorf("no reverse sharing invitation found from %s for session %s", hostUser, sessionName)
+		}
+		return nil, fmt.Errorf("no reverse sharing invitation found from %s", hostUser)
+	}
+
+	return latestInvitation, nil
+}
+
+// parseReverseInvitation parses a reverse invitation message file
+func (m *Manager) parseReverseInvitation(msgFile string) (*ReverseInvitation, error) {
+	content, err := os.ReadFile(msgFile)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	invitation := &ReverseInvitation{}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "FROM":
+			invitation.From = value
+		case "SESSION":
+			invitation.SessionName = value
+		case "PORT":
+			if port, err := strconv.Atoi(value); err == nil {
+				invitation.Port = port
+			}
+		case "HOSTNAME":
+			invitation.HostIP = value
+		case "PASSWORD_PROTECTED":
+			invitation.PasswordProtected = value == "true"
+		case "PRIVATE":
+			invitation.Private = value == "true"
+		case "MODE":
+			invitation.Mode = value
+		case "TIMESTAMP":
+			if ts, err := strconv.ParseInt(value, 10, 64); err == nil {
+				invitation.Timestamp = ts
+			}
+		}
+	}
+
+	// Validate required fields
+	if invitation.From == "" || invitation.Port == 0 || invitation.HostIP == "" {
+		return nil, fmt.Errorf("invalid invitation message format")
+	}
+
+	return invitation, nil
 }
