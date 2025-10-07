@@ -210,7 +210,7 @@ func startRegularSession() {
 	}
 }
 
-// registerCurrentUser registers the current user in the database
+// registerCurrentUser registers the current user in the database (prevents duplicates)
 func registerCurrentUser() {
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
@@ -219,15 +219,71 @@ func registerCurrentUser() {
 
 	// Get current IP (simplified - could be enhanced)
 	hostname, _ := os.Hostname()
+	userEntry := fmt.Sprintf("%s:%s", currentUser, hostname)
 	
-	// Write to users file
-	userEntry := fmt.Sprintf("%s:%s\n", currentUser, hostname)
+	// Read existing entries to check for duplicates
+	existingEntries := readUsersFile()
 	
-	file, err := os.OpenFile(cfg.UsersFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
+	// First, remove any existing entries for this user and check if exact entry exists
+	var filteredEntries []string
+	exactEntryExists := false
+	
+	for _, entry := range existingEntries {
+		entryTrimmed := strings.TrimSpace(entry)
+		parts := strings.Split(entryTrimmed, ":")
+		
+		if len(parts) >= 1 && parts[0] == currentUser {
+			// This entry is for the current user
+			if entryTrimmed == userEntry {
+				// Exact entry already exists
+				exactEntryExists = true
+			}
+			// Skip all entries for this user (we'll add the current one back)
+			continue
+		}
+		filteredEntries = append(filteredEntries, entry)
+	}
+	
+	// If exact entry already exists, no need to update
+	if exactEntryExists && len(filteredEntries) == len(existingEntries)-1 {
 		return
 	}
-	defer file.Close()
 	
-	file.WriteString(userEntry)
+	// Add the new/updated entry
+	filteredEntries = append(filteredEntries, userEntry)
+	
+	// Write back all entries
+	writeUsersFile(filteredEntries)
 }
+
+// readUsersFile reads all entries from users.db
+func readUsersFile() []string {
+	content, err := os.ReadFile(cfg.UsersFile)
+	if err != nil {
+		return []string{} // File doesn't exist yet
+	}
+	
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	var entries []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
+// writeUsersFile writes all entries to users.db
+func writeUsersFile(entries []string) {
+	content := strings.Join(entries, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	
+	err := os.WriteFile(cfg.UsersFile, []byte(content), 0644)
+	if err != nil {
+		color.Yellow("Warning: Could not update users database: %v", err)
+	}
+}
+

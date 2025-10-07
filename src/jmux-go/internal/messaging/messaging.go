@@ -105,8 +105,12 @@ func (m *Messaging) StartLiveMonitoring() error {
 		m.logger.Info("Live monitoring started for user %s, file: %s", currentUser, userMessageFile)
 	}
 
-	// Start tail-based monitoring
+	// Start tail-based monitoring for main messages file
 	go m.tailUserMessages(userMessageFile)
+
+	// Also start monitoring for user invitations file
+	userInvitesFile := filepath.Join(m.config.MessagesDir, currentUser+".invites")
+	go m.tailUserInvites(userInvitesFile)
 
 	return nil
 }
@@ -141,6 +145,127 @@ func (m *Messaging) tailUserMessages(userMessageFile string) {
 			return
 		}
 	}
+}
+
+// tailUserInvites monitors a user's invites file using tail-like approach  
+func (m *Messaging) tailUserInvites(userInvitesFile string) {
+	if m.logger != nil {
+		m.logger.Debug("Starting tail monitoring for invites: %s", userInvitesFile)
+	}
+
+	// Ensure the invites file exists with proper permissions
+	if _, err := os.Stat(userInvitesFile); os.IsNotExist(err) {
+		// Create file with 666 permissions to allow shared access
+		file, err := os.OpenFile(userInvitesFile, os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("Failed to create user invites file: %v", err)
+			}
+			return
+		}
+		file.Close()
+		
+		// Explicitly set permissions for shared directory scenarios
+		if err := os.Chmod(userInvitesFile, 0666); err != nil {
+			if m.logger != nil {
+				m.logger.Debug("Could not set file permissions for %s: %v", userInvitesFile, err)
+			}
+		}
+		
+		if m.logger != nil {
+			m.logger.Info("Created user invites file with shared permissions: %s", userInvitesFile)
+		}
+	}
+
+	// Get initial file position
+	lastSize := int64(0)
+	if stat, err := os.Stat(userInvitesFile); err == nil {
+		lastSize = stat.Size()
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond) // Poll every 500ms like messages
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := m.checkForNewInvites(userInvitesFile, &lastSize); err != nil {
+				if m.logger != nil {
+					m.logger.Debug("Error checking for new invites: %v", err)
+				}
+			}
+		case <-m.done:
+			if m.logger != nil {
+				m.logger.Debug("Invites monitoring stopped")
+			}
+			return
+		}
+	}
+}
+
+// checkForNewInvites checks if the invites file has new invitations and processes them
+func (m *Messaging) checkForNewInvites(userInvitesFile string, lastSize *int64) error {
+	stat, err := os.Stat(userInvitesFile)
+	if err != nil {
+		return err
+	}
+
+	currentSize := stat.Size()
+	if currentSize <= *lastSize {
+		return nil // No new content
+	}
+
+	// Read all invitations from the file
+	file, err := os.Open(userInvitesFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var invitations []Message
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			var invite Message
+			if err := json.Unmarshal([]byte(line), &invite); err != nil {
+				if m.logger != nil {
+					m.logger.Debug("Error parsing invitation JSON: %v", err)
+				}
+				continue // Skip malformed lines
+			}
+			invitations = append(invitations, invite)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	// Display all invitations found
+	for _, invite := range invitations {
+		if err := m.handleNewMessageLine(invite); err != nil {
+			if m.logger != nil {
+				m.logger.Debug("Error processing invitation: %v", err)
+			}
+		}
+	}
+
+	// Clear the file after processing all invitations (monitor consumes them)
+	if len(invitations) > 0 {
+		if err := os.Truncate(userInvitesFile, 0); err != nil {
+			if m.logger != nil {
+				m.logger.Debug("Could not clear invites file after processing: %v", err)
+			}
+		} else {
+			if m.logger != nil {
+				m.logger.Info("Cleared %d processed invitations from file", len(invitations))
+			}
+			*lastSize = 0 // Reset size tracking after clearing
+		}
+	}
+
+	return nil
 }
 
 // checkForNewMessages checks if the file has new messages and processes them
@@ -438,7 +563,62 @@ func (m *Messaging) SendMessage(toUser string, msgType MessageType, data string)
 	return nil
 }
 
-// ReadMessages reads and displays messages for current user from their message file
+// SendInvitation sends an invitation to a user by appending to their invites file
+func (m *Messaging) SendInvitation(toUser string, inviteData string) error {
+	timestamp := time.Now().Unix()
+	userInvitesFile := filepath.Join(m.config.MessagesDir, toUser+".invites")
+
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		currentUser = "unknown"
+	}
+
+	// Create JSON invitation format for easier parsing
+	invitationLine := fmt.Sprintf("{\"from\":\"%s\",\"type\":\"%s\",\"timestamp\":%d,\"data\":\"%s\",\"priority\":\"high\"}\n", 
+		currentUser, MessageTypeInvite, timestamp, strings.ReplaceAll(inviteData, "\"", "\\\""))
+
+	// Ensure invites file exists with proper permissions before writing
+	if _, err := os.Stat(userInvitesFile); os.IsNotExist(err) {
+		// Create file with 666 permissions for shared access
+		if file, err := os.OpenFile(userInvitesFile, os.O_CREATE|os.O_WRONLY, 0666); err != nil {
+			return fmt.Errorf("failed to create user invites file: %v", err)
+		} else {
+			file.Close()
+			// Explicitly set permissions
+			os.Chmod(userInvitesFile, 0666)
+			if m.logger != nil {
+				m.logger.Info("Created user invites file for %s with shared permissions", toUser)
+			}
+		}
+	}
+
+	// Append invitation to user's invites file
+	file, err := os.OpenFile(userInvitesFile, os.O_APPEND|os.O_WRONLY, 0666)
+	if err != nil {
+		return fmt.Errorf("failed to open user invites file: %v", err)
+	}
+	defer file.Close()
+
+	// Ensure permissions are correct (in case file already existed)
+	if err := os.Chmod(userInvitesFile, 0666); err != nil {
+		if m.logger != nil {
+			m.logger.Debug("Could not set file permissions for %s: %v", userInvitesFile, err)
+		}
+	}
+
+	// Write the invitation
+	if _, err := file.WriteString(invitationLine); err != nil {
+		return fmt.Errorf("failed to write invitation: %v", err)
+	}
+
+	if m.logger != nil {
+		m.logger.Info("Invitation sent to %s: %s", toUser, inviteData)
+	}
+
+	return nil
+}
+
+// ReadMessages reads and displays messages for current user from their message and invites files
 func (m *Messaging) ReadMessages() error {
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
@@ -446,34 +626,27 @@ func (m *Messaging) ReadMessages() error {
 	}
 
 	userMessageFile := filepath.Join(m.config.MessagesDir, currentUser+".messages")
+	userInvitesFile := filepath.Join(m.config.MessagesDir, currentUser+".invites")
 	
-	// Check if user message file exists
-	if _, err := os.Stat(userMessageFile); os.IsNotExist(err) {
-		color.Yellow("No new messages")
-		return nil
+	var allMessages []Message
+	
+	// Read from main messages file
+	if _, err := os.Stat(userMessageFile); err == nil {
+		messages, err := m.readMessagesFromFile(userMessageFile)
+		if err == nil {
+			allMessages = append(allMessages, messages...)
+		}
 	}
-
-	// Read all messages from the file
-	file, err := os.Open(userMessageFile)
-	if err != nil {
-		return fmt.Errorf("failed to open user message file: %v", err)
-	}
-	defer file.Close()
-
-	var messages []Message
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			var msg Message
-			if err := json.Unmarshal([]byte(line), &msg); err != nil {
-				continue // Skip malformed lines
-			}
-			messages = append(messages, msg)
+	
+	// Read from invites file  
+	if _, err := os.Stat(userInvitesFile); err == nil {
+		invites, err := m.readMessagesFromFile(userInvitesFile)
+		if err == nil {
+			allMessages = append(allMessages, invites...)
 		}
 	}
 
-	if len(messages) == 0 {
+	if len(allMessages) == 0 {
 		color.Yellow("No new messages")
 		return nil
 	}
@@ -482,7 +655,7 @@ func (m *Messaging) ReadMessages() error {
 	color.Green("New Messages")
 	color.Blue("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	for _, msg := range messages {
+	for _, msg := range allMessages {
 		fmt.Printf("\n")
 		switch msg.Type {
 		case MessageTypeInvite:
@@ -501,12 +674,44 @@ func (m *Messaging) ReadMessages() error {
 
 	fmt.Println()
 
-	// Clear messages by truncating the file
-	if err := os.Truncate(userMessageFile, 0); err != nil {
-		return fmt.Errorf("failed to clear messages: %v", err)
+	// Clear both files by truncating them
+	if _, err := os.Stat(userMessageFile); err == nil {
+		if err := os.Truncate(userMessageFile, 0); err != nil {
+			return fmt.Errorf("failed to clear messages: %v", err)
+		}
+	}
+	
+	if _, err := os.Stat(userInvitesFile); err == nil {
+		if err := os.Truncate(userInvitesFile, 0); err != nil {
+			return fmt.Errorf("failed to clear invites: %v", err)
+		}
 	}
 
 	return nil
+}
+
+// readMessagesFromFile reads messages from a specific file
+func (m *Messaging) readMessagesFromFile(filePath string) ([]Message, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var messages []Message
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			var msg Message
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				continue // Skip malformed lines
+			}
+			messages = append(messages, msg)
+		}
+	}
+
+	return messages, scanner.Err()
 }
 
 // readMessageFile reads a message file

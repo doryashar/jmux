@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -188,15 +189,51 @@ func performSessionCleanup() int {
 		return 0
 	}
 
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		color.Yellow("⚠️  Warning: unable to determine current user for cleanup")
+		return 0
+	}
+
 	pattern := "*.session"
 	matches, err := filepath.Glob(filepath.Join(cfg.SessionsDir, pattern))
 	if err != nil {
 		return 0
 	}
 
+	// Load active sessions from database to avoid cleaning them
+	activeSessions := loadActiveSessionsFromDB()
+
 	cleaned := 0
 	for _, sessionFile := range matches {
+		session, err := readSessionFromFile(sessionFile)
+		if err != nil {
+			// Can't read file - only remove if we own it
+			if isOwnedByCurrentUser(sessionFile, currentUser) {
+				color.Yellow("🗑️  Removing unreadable session file: %s", filepath.Base(sessionFile))
+				os.Remove(sessionFile)
+				cleaned++
+			} else {
+				color.Yellow("⚠️  Skipping unreadable session file from other user: %s", filepath.Base(sessionFile))
+			}
+			continue
+		}
+
+		// Check if this session belongs to current user
+		if session.User != currentUser {
+			color.Yellow("⚠️  Skipping session from other user: %s (user: %s)", session.Name, session.User)
+			continue
+		}
+
+		// Check if session is in active database - if so, don't clean it
+		if isSessionActiveInDB(session, activeSessions) {
+			color.Blue("✓ Preserving active session in database: %s (port: %d)", session.Name, session.Port)
+			continue
+		}
+
+		// Check if session is truly stale
 		if isStaleSession(sessionFile) {
+			color.Yellow("🗑️  Removing stale session: %s (port: %d)", session.Name, session.Port)
 			os.Remove(sessionFile)
 			cleaned++
 		}
@@ -278,6 +315,64 @@ type sessionData struct {
 	Name string
 	Port int
 	PID  int
+}
+
+// loadActiveSessionsFromDB loads currently active sessions from database
+func loadActiveSessionsFromDB() []*sessionData {
+	if cfg == nil {
+		return nil
+	}
+
+	pattern := "*.session"
+	matches, err := filepath.Glob(filepath.Join(cfg.SessionsDir, pattern))
+	if err != nil {
+		return nil
+	}
+
+	var sessions []*sessionData
+	for _, sessionFile := range matches {
+		session, err := readSessionFromFile(sessionFile)
+		if err != nil {
+			continue
+		}
+		sessions = append(sessions, session)
+	}
+
+	return sessions
+}
+
+// isOwnedByCurrentUser checks if a file is owned by the current user
+func isOwnedByCurrentUser(filePath, currentUser string) bool {
+	// Get file info
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return false
+	}
+	
+	// On Unix systems, get the file ownership
+	if stat, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
+		// Get current user UID
+		currentUID := os.Getuid()
+		
+		// Check if file is owned by current user
+		return int(stat.Uid) == currentUID
+	}
+	
+	// Fallback: if we can't determine ownership, allow only if filename contains user
+	fileName := filepath.Base(filePath)
+	return strings.HasPrefix(fileName, currentUser+"_")
+}
+
+// isSessionActiveInDB checks if a session is currently active in the database
+func isSessionActiveInDB(session *sessionData, activeSessions []*sessionData) bool {
+	for _, activeSession := range activeSessions {
+		if activeSession.User == session.User && 
+		   activeSession.Name == session.Name && 
+		   activeSession.Port == session.Port {
+			return true
+		}
+	}
+	return false
 }
 
 // performPortMappingCleanup removes stale port mappings and returns count of cleaned entries
