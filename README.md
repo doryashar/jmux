@@ -351,6 +351,10 @@ This project is provided as-is for internal use.
 [ ] Validate encryption pass
 [ ] Validate - jcat/dmux should also support reverse for client. when client is running dmux ask-share [users] client is starting to listen for connection. host is getting notification message and when host is connecting to the client then sharing its session.
 [ ] msg monitoring does not work on nfs
+[ ] Validate sigswitch on start?
+[ ] Debug invite messages propagation?
+[ ] join-share spaces fix 
+[ ] Validate reverse join-share from tmux and from terminal
 
 when host detach the sharing is done - why?
 if running share with name but the session name exists. if this session is not in share make it share. if no name was given a new session should be created

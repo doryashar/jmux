@@ -341,8 +341,12 @@ func runReverseServer(address string) {
 			log.Printf("[%s] accept error: %v", conn.RemoteAddr().String(), err)
 			continue
 		}
-		go handleReverse(conn)
-		// break
+
+		// Close the listener to prevent new connections
+		ln.Close()
+		
+		handleReverse(conn)
+		break // Exit after handling one connection
 	}
 }
 

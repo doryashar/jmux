@@ -851,12 +851,18 @@ func (m *Manager) startServerInBackground(port int) error {
 		return fmt.Errorf("failed to set tmux environment: %v", err)
 	}
 	
-	// Create the command string for tmux
-	cmdString := fmt.Sprintf("%s %s", jmuxBinary, strings.Join(args, " "))
+	// Create the command string for tmux with proper quoting
+	quotedArgs := make([]string, len(args))
+	for i, arg := range args {
+		quotedArgs[i] = fmt.Sprintf("%q", arg)
+	}
+	cmdString := fmt.Sprintf("%q %s", jmuxBinary, strings.Join(quotedArgs, " "))
 	
 	// Start the jcat server in a new tmux window within the current session
 	// This ensures the server dies when the session is killed
-	tmuxCmd := exec.Command("tmux", "new-window", "-t", currentSession, "-d", "-n", "jcat-server", cmdString)
+	// Use a unique window name to avoid conflicts
+	windowName := fmt.Sprintf("jcat-server-%d", port)
+	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-n", windowName, cmdString)
 	
 	if err := tmuxCmd.Run(); err != nil {
 		return fmt.Errorf("failed to start jcat server in tmux window: %v", err)
@@ -910,6 +916,8 @@ func (m *Manager) StartReverseShare(inviteUsers []string, password string, priva
 	if currentUser == "" {
 		return fmt.Errorf("unable to determine current user")
 	}
+
+	// ask-share doesn't need to be in tmux initially - it will create its own session
 
 	// Find an available port
 	port, err := m.findAvailablePort()
@@ -978,14 +986,72 @@ func (m *Manager) waitForReverseConnections(session *Session) error {
 
 // startSimpleReverseListener starts a TCP listener for reverse sharing connections
 func (m *Manager) startSimpleReverseListener(session *Session) error {
-	// Check if we're already in a tmux session
-	if m.isInTmuxSession() {
-		// We're in tmux, use the existing session sharing mechanism
-		return m.startServerInBackground(session.Port)
-	} else {
-		// We're not in tmux, create a tmux session and start jcat server inside it
-		return m.createAndShareTmuxSession(session)
+	// For reverse sharing, we just start a simple jcat server that waits for clients
+	// The clients will share their sessions with us when they connect
+	return m.startStandaloneJcatServer(session.Port)
+}
+
+// startStandaloneJcatServer starts a jcat reverse-listen server for reverse sharing
+func (m *Manager) startStandaloneJcatServer(port int) error {
+	// Find the jcat binary
+	jcatBinary := filepath.Join(filepath.Dir(m.config.ConfigDir), "..", "..", "..", "common", "work", "dory", "jmux", "bin", "jcat")
+	if _, err := os.Stat(jcatBinary); os.IsNotExist(err) {
+		// Fallback to local jcat
+		if execPath, err := os.Executable(); err == nil {
+			jcatBinary = filepath.Join(filepath.Dir(execPath), "jcat")
+		} else {
+			jcatBinary = "jcat" // Hope it's in PATH
+		}
 	}
+
+	// // Create a unique tmux session for reverse sharing
+	// currentUser := os.Getenv("USER")
+	// timestamp := time.Now().Unix()
+	// tmuxSessionName := fmt.Sprintf("reverse-server-%s-%d", currentUser, timestamp)
+	
+	// color.Blue("🔄 Creating tmux session '%s' for reverse sharing...", tmuxSessionName)
+	
+	// // Create tmux session for the reverse sharing
+	// createCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSessionName)
+	// if err := createCmd.Run(); err != nil {
+	// 	return fmt.Errorf("failed to create tmux session: %v", err)
+	// }
+	
+	// Start jcat reverse-listen in the tmux session
+	address := fmt.Sprintf(":%d", port)
+	// jcatCmd := fmt.Sprintf("%s reverse-listen %s", jcatBinary, address)
+	
+	// Send the jcat command to the tmux session
+	// sendCmd := exec.Command("tmux", "send-keys", "-t", tmuxSessionName, jcatCmd, "Enter")
+	sendCmd := exec.Command(jcatBinary, "reverse-listen", address)
+
+	sendCmd.Stdin = os.Stdin
+	sendCmd.Stdout = os.Stdout
+	sendCmd.Stderr = os.Stderr	
+	return sendCmd.Run()
+
+	// if err := sendCmd.Run(); err != nil {
+	// 	return fmt.Errorf("failed to start jcat in session: %v", err)
+	// }
+	
+	// color.Green("🚀 jcat reverse-listen started on port %d in tmux session '%s'", port, tmuxSessionName)
+	// color.Yellow("⏳ Waiting for client to connect...")
+	
+	// // Wait for client connection before attaching
+	// err := m.waitForClientConnection(tmuxSessionName, port)
+	// if err != nil {
+	// 	return fmt.Errorf("error waiting for client connection: %v", err)
+	// }
+	
+	// // Client connected! Now attach to the tmux session to see the shared session
+	// color.Green("🔗 Client connected! Attaching to shared session...")
+	// attachCmd := exec.Command("tmux", "attach-session", "-t", tmuxSessionName)
+	// attachCmd.Stdin = os.Stdin
+	// attachCmd.Stdout = os.Stdout
+	// attachCmd.Stderr = os.Stderr
+	
+	// // This will block and show user the shared session
+	// return attachCmd.Run()
 }
 
 // sendReverseInvitations sends invitation messages for reverse sharing
@@ -1081,12 +1147,349 @@ func (m *Manager) JoinReverseShare(hostUser, sessionName string, modeOverride st
 
 	color.Blue("🔗 Connecting to %s's reverse sharing session (%s) at %s:%d%s...", 
 		hostUser, invitation.SessionName, invitation.HostIP, invitation.Port, modeDesc)
-	color.Yellow("Press Ctrl+C to disconnect")
 
-	// Connect using jcat client
-	client := jcat.NewClientWithMode(fmt.Sprintf("%s:%d", invitation.HostIP, invitation.Port), actualMode)
-	return client.Connect()
+	// Check if we're in a tmux session
+	if !m.isInTmuxSession() {
+		// Not in tmux, create a session and re-run join-share from within it
+		return m.runJoinShareInTmux(hostUser, sessionName, modeOverride, password)
+	}
+
+	// We're in tmux, start reverse connection in background window
+	return m.startReverseConnectionInBackground(invitation.HostIP, invitation.Port)
 }
+
+// connectWithJcatReverse uses jcat reverse-connect to share current session with server
+func (m *Manager) connectWithJcatReverse(hostIP string, port int) error {
+	// Find the jcat binary
+	jcatBinary := filepath.Join(filepath.Dir(m.config.ConfigDir), "..", "..", "..", "common", "work", "dory", "jmux", "bin", "jcat")
+	if _, err := os.Stat(jcatBinary); os.IsNotExist(err) {
+		// Fallback to local jcat
+		if execPath, err := os.Executable(); err == nil {
+			jcatBinary = filepath.Join(filepath.Dir(execPath), "jcat")
+		} else {
+			jcatBinary = "jcat" // Hope it's in PATH
+		}
+	}
+
+	// Build the connection address
+	address := fmt.Sprintf("%s:%d", hostIP, port)
+	
+	// Show connection status
+	color.Yellow("🔀 Sharing your session with %s...", address)
+	color.Yellow("Press Ctrl+C to disconnect")
+	
+	// Execute jcat reverse-connect
+	cmd := exec.Command(jcatBinary, "reverse-connect", address)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	// This will block until the connection ends
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("jcat reverse-connect failed: %v", err)
+	}
+	
+	color.Green("✅ Reverse sharing session ended")
+	return nil
+}
+
+// runJoinShareInTmux creates a tmux session with 2 windows: shared session (focused) + jcat window  
+func (m *Manager) runJoinShareInTmux(hostUser, sessionName string, modeOverride string, password string) error {
+	currentUser := os.Getenv("USER")
+	timestamp := time.Now().Unix()
+	tmuxSessionName := fmt.Sprintf("reverse-client-%s-%d", currentUser, timestamp)
+	
+	color.Blue("🔄 Creating tmux session '%s' with 2 windows for reverse sharing...", tmuxSessionName)
+	
+	// Create tmux session with initial shell window (this will be the shared session)
+	createSessionCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSessionName, "-n", "shared-session")
+	if err := createSessionCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tmux session: %v", err)
+	}
+	
+	// Now we're ready to start the reverse connection process from within tmux
+	// Get the invitation and connect
+	invitation, err := m.findReverseInvitation(hostUser, sessionName)
+	if err != nil {
+		// Clean up session if we can't get invitation
+		exec.Command("tmux", "kill-session", "-t", tmuxSessionName).Run()
+		return fmt.Errorf("failed to get invitation: %v", err)
+	}
+	
+	// Create jcat reverse-connect window (but don't focus on it)
+	if err := m.startReverseConnectionInSpecificSession(tmuxSessionName, invitation.HostIP, invitation.Port); err != nil {
+		// Clean up session on failure
+		exec.Command("tmux", "kill-session", "-t", tmuxSessionName).Run()
+		return fmt.Errorf("failed to start reverse connection: %v", err)
+	}
+	
+	// Attach to the session (focus will be on the shared-session window)
+	attachCmd := exec.Command("tmux", "attach-session", "-t", tmuxSessionName)
+	attachCmd.Stdin = os.Stdin
+	attachCmd.Stdout = os.Stdout
+	attachCmd.Stderr = os.Stderr
+	
+	return attachCmd.Run()
+}
+
+
+// waitForClientConnection waits for a client to connect to the reverse sharing session
+func (m *Manager) waitForClientConnection(tmuxSessionName string, port int) error {
+	// Check for connection by monitoring the tmux session output or port activity
+	// We'll check if there's activity in the tmux session indicating a connection
+	
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	
+	timeout := time.After(5 * time.Minute) // 5 minute timeout
+	
+	for {
+		select {
+		case <-ticker.C:
+			// Check if there's connection activity by examining tmux session content
+			// Look for the "Connected to" message from jcat reverse-listen
+			cmd := exec.Command("tmux", "capture-pane", "-t", tmuxSessionName, "-p")
+			output, err := cmd.Output()
+			if err != nil {
+				continue // Ignore errors and keep checking
+			}
+			
+			// Check if we see connection messages from jcat
+			outputStr := string(output)
+			if strings.Contains(outputStr, "🔗 Connected to shared session from") ||
+			   strings.Contains(outputStr, "Connected to client shell from") {
+				// Client connected!
+				return nil
+			}
+			
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for client connection")
+		}
+	}
+}
+
+// startReverseConnectionInSpecificSession starts reverse connection in a specific tmux session
+func (m *Manager) startReverseConnectionInSpecificSession(tmuxSessionName string, hostIP string, port int) error {
+	// Find the jcat binary
+	jcatBinary := filepath.Join(filepath.Dir(m.config.ConfigDir), "..", "..", "..", "common", "work", "dory", "jmux", "bin", "jcat")
+	if _, err := os.Stat(jcatBinary); os.IsNotExist(err) {
+		// Fallback to local jcat
+		if execPath, err := os.Executable(); err == nil {
+			jcatBinary = filepath.Join(filepath.Dir(execPath), "jcat")
+		} else {
+			jcatBinary = "jcat" // Hope it's in PATH
+		}
+	}
+
+	// Build the connection address
+	address := fmt.Sprintf("%s:%d", hostIP, port)
+	
+	// Create new tmux window for the reverse connection in the specified session
+	windowName := fmt.Sprintf("reverse-share-%d", time.Now().Unix())
+	
+	color.Yellow("🔀 Starting reverse connection in tmux window '%s'...", windowName)
+	
+	// Create a wrapper script to attach jcat to current tmux session
+	wrapperScript := fmt.Sprintf("/tmp/jcat-tmux-wrapper-%d.sh", time.Now().Unix())
+	scriptContent := fmt.Sprintf(`#!/bin/bash
+# jcat wrapper script to attach to current tmux session instead of starting new bash
+if [ -n "$TMUX" ]; then
+    # We're in tmux, get current session and attach to it
+    CURRENT_SESSION=$(tmux display-message -p '#S')
+    exec tmux attach-session -t "$CURRENT_SESSION"
+else
+    # Fallback to regular bash if not in tmux
+    exec /bin/bash -i
+fi
+`)
+	
+	// Write the wrapper script
+	if err := os.WriteFile(wrapperScript, []byte(scriptContent), 0755); err != nil {
+		return fmt.Errorf("failed to create wrapper script: %v", err)
+	}
+	
+	// Clean up script after use (run in background)
+	go func() {
+		time.Sleep(30 * time.Second) // Give it time to be used
+		os.Remove(wrapperScript)
+	}()
+	
+	// Create new window and run jcat reverse-connect with wrapper script in specified session
+	jcatCmd := fmt.Sprintf("JCAT_SETSIZE_SCRIPT=%s %s reverse-connect %s", wrapperScript, jcatBinary, address)
+	newWindowCmd := exec.Command("tmux", "new-window", "-t", tmuxSessionName, "-n", windowName, jcatCmd)
+	
+	if err := newWindowCmd.Run(); err != nil {
+		return fmt.Errorf("failed to start reverse connection in session %s: %v", tmuxSessionName, err)
+	}
+	
+	color.Green("✅ Reverse connection started in background window '%s' of session '%s'", windowName, tmuxSessionName)
+	
+	// Monitor the jcat process for early failures (connection refused, etc.)
+	go func() {
+		time.Sleep(3 * time.Second) // Give jcat time to start and fail
+		
+		// Check if the window still exists and if jcat failed
+		checkCmd := exec.Command("tmux", "capture-pane", "-t", tmuxSessionName+":"+windowName, "-p")
+		output, err := checkCmd.Output()
+		if err != nil {
+			// Window might have been closed due to jcat failure
+			color.Red("❌ Reverse connection failed - window closed")
+			return
+		}
+		
+		outputStr := string(output)
+		if strings.Contains(outputStr, "Connection refused") || strings.Contains(outputStr, "Connection failed") {
+			color.Red("❌ Reverse connection failed - server not available")
+			color.Yellow("💡 Cleaning up session '%s'...", tmuxSessionName)
+			// Kill the entire session since this was a dedicated session for reverse sharing
+			exec.Command("tmux", "kill-session", "-t", tmuxSessionName).Run()
+		}
+	}()
+	
+	return nil
+}
+
+// startReverseConnectionInBackground starts the reverse connection in a new tmux window, keeping focus on current window
+func (m *Manager) startReverseConnectionInBackground(hostIP string, port int) error {
+	// Find the jcat binary
+	jcatBinary := filepath.Join(filepath.Dir(m.config.ConfigDir), "..", "..", "..", "common", "work", "dory", "jmux", "bin", "jcat")
+	if _, err := os.Stat(jcatBinary); os.IsNotExist(err) {
+		// Fallback to local jcat
+		if execPath, err := os.Executable(); err == nil {
+			jcatBinary = filepath.Join(filepath.Dir(execPath), "jcat")
+		} else {
+			jcatBinary = "jcat" // Hope it's in PATH
+		}
+	}
+
+	// Get current tmux session name
+	currentSession, err := m.getCurrentTmuxSession()
+	if err != nil {
+		return fmt.Errorf("failed to get current tmux session: %v", err)
+	}
+	
+	// Build the connection address
+	address := fmt.Sprintf("%s:%d", hostIP, port)
+	
+	// Create new tmux window for the reverse connection
+	windowName := fmt.Sprintf("reverse-share-%d", time.Now().Unix())
+	
+	color.Yellow("🔀 Starting reverse connection in tmux window '%s'...", windowName)
+	
+	// Create a wrapper script to attach jcat to current tmux session
+	wrapperScript := fmt.Sprintf("/tmp/jcat-tmux-wrapper-%d.sh", time.Now().Unix())
+	scriptContent := fmt.Sprintf(`#!/bin/bash
+# jcat wrapper script to attach to current tmux session instead of starting new bash
+if [ -n "$TMUX" ]; then
+    # We're in tmux, get current session and attach to it
+    CURRENT_SESSION=$(tmux display-message -p '#S')
+    exec tmux attach-session -t "$CURRENT_SESSION"
+else
+    # Fallback to regular bash if not in tmux
+    exec /bin/bash -i
+fi
+`)
+	
+	// Write the wrapper script
+	if err := os.WriteFile(wrapperScript, []byte(scriptContent), 0755); err != nil {
+		return fmt.Errorf("failed to create wrapper script: %v", err)
+	}
+	
+	// Clean up script after use (run in background)
+	go func() {
+		time.Sleep(30 * time.Second) // Give it time to be used
+		os.Remove(wrapperScript)
+	}()
+	
+	// Get current window name to restore focus later
+	currentWindowCmd := exec.Command("tmux", "display-message", "-p", "#W")
+	currentWindowBytes, err := currentWindowCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get current window: %v", err)
+	}
+	currentWindow := strings.TrimSpace(string(currentWindowBytes))
+	
+	// Create new window and run jcat reverse-connect with wrapper script
+	jcatCmd := fmt.Sprintf("JCAT_SETSIZE_SCRIPT=%s %s reverse-connect %s", wrapperScript, jcatBinary, address)
+	newWindowCmd := exec.Command("tmux", "new-window", "-t", currentSession, "-n", windowName, jcatCmd)
+	
+	if err := newWindowCmd.Run(); err != nil {
+		return fmt.Errorf("failed to start reverse connection in background: %v", err)
+	}
+	
+	// Switch back to the original window to keep focus there
+	switchBackCmd := exec.Command("tmux", "select-window", "-t", currentSession+":"+currentWindow)
+	if err := switchBackCmd.Run(); err != nil {
+		// Not critical if we can't switch back, just log it
+		color.Yellow("⚠️  Could not switch back to original window '%s': %v", currentWindow, err)
+	}
+	
+	color.Green("✅ Reverse connection started in background window '%s'", windowName)
+	color.Yellow("💡 Use 'tmux list-windows' to see active windows") 
+	color.Yellow("💡 Use 'tmux select-window -t %s' to switch to the sharing window", windowName)
+	
+	// Monitor the jcat process for early failures (connection refused, etc.)
+	go func() {
+		time.Sleep(3 * time.Second) // Give jcat time to start and fail
+		
+		// Check if the window still exists and if jcat failed
+		checkCmd := exec.Command("tmux", "capture-pane", "-t", currentSession+":"+windowName, "-p")
+		output, err := checkCmd.Output()
+		if err != nil {
+			// Window might have been closed due to jcat failure
+			color.Red("❌ Reverse connection failed - window closed")
+			return
+		}
+		
+		outputStr := string(output)
+		if strings.Contains(outputStr, "Connection refused") || strings.Contains(outputStr, "Connection failed") {
+			color.Red("❌ Reverse connection failed - server not available")
+			color.Yellow("💡 Cleaning up window '%s'...", windowName)
+			// Kill just the window since user was already in their own session
+			exec.Command("tmux", "kill-window", "-t", currentSession+":"+windowName).Run()
+		}
+	}()
+	
+	return nil
+}
+
+// ensureClientTmuxSession ensures we have a tmux session to share when joining reverse sharing
+func (m *Manager) ensureClientTmuxSession(sessionName string) error {
+	currentUser := os.Getenv("USER")
+	
+	// If no session name provided, generate one
+	if sessionName == "" {
+		timestamp := time.Now().Unix()
+		sessionName = fmt.Sprintf("dmux-%s-%d", currentUser, timestamp)
+	}
+	
+	// Check if we're already in a tmux session
+	if m.isInTmuxSession() {
+		// We're already in tmux, use the current session
+		currentSession, err := m.getCurrentTmuxSession()
+		if err != nil {
+			return fmt.Errorf("failed to get current tmux session: %v", err)
+		}
+		color.Blue("📋 Using current tmux session '%s' for reverse sharing", currentSession)
+		return nil
+	}
+	
+	// Check if the session already exists
+	checkCmd := exec.Command("tmux", "has-session", "-t", sessionName)
+	if checkCmd.Run() == nil {
+		// Session exists, attach to it
+		color.Blue("📋 Attaching to existing tmux session '%s'", sessionName)
+		attachCmd := exec.Command("tmux", "attach-session", "-t", sessionName)
+		return attachCmd.Run()
+	}
+	
+	// Session doesn't exist, create and attach to it
+	color.Blue("🔄 Creating new tmux session '%s' for reverse sharing", sessionName)
+	createCmd := exec.Command("tmux", "new-session", "-s", sessionName)
+	return createCmd.Run()
+}
+
 
 // ReverseInvitation represents a reverse sharing invitation
 type ReverseInvitation struct {
@@ -1236,11 +1639,11 @@ func (m *Manager) createAndShareTmuxSession(session *Session) error {
 	}
 	
 	// Start the jcat server in the new session
-	cmdString := fmt.Sprintf("%s _internal_jcat_server %d %s", jmuxBinary, session.Port, m.config.SetSizeScript)
+	cmdString := fmt.Sprintf("%q _internal_jcat_server %d %q", jmuxBinary, session.Port, m.config.SetSizeScript)
 	cmd := exec.Command("tmux", "send-keys", "-t", tmuxSessionName, cmdString, "Enter")
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create tmux session with jcat server: %v", err)
+		return fmt.Errorf("failed to send jcat server command to tmux session '%s': %v. Command: %s", tmuxSessionName, err, cmdString)
 	}
 
 	color.Green("✅ Created tmux session '%s' with jcat server on port %d", tmuxSessionName, session.Port)

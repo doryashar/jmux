@@ -15,14 +15,14 @@ mkdir -p "$BIN_DIR"
 
 # Build jcat as a static binary for portability
 cd "$SRC_DIR"
-CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -o "$BIN_DIR/jcat-binary" ./jcat.go
+CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-w -s -extldflags "-static"' -o "$BIN_DIR/jcat" ./jcat.go
 
-echo "✓ jcat built successfully at $BIN_DIR/jcat-binary"
+echo "✓ jcat built successfully at $BIN_DIR/jcat"
 
 # Make it executable
-chmod +x "$BIN_DIR/jcat-binary"
+chmod +x "$BIN_DIR/jcat"
 
 # Show binary info
 echo "Binary info:"
-ls -lh "$BIN_DIR/jcat-binary"
-file "$BIN_DIR/jcat-binary"
+ls -lh "$BIN_DIR/jcat"
+file "$BIN_DIR/jcat"
