@@ -3,6 +3,48 @@
 
 set -e
 
+# Parse command line options
+DRY_RUN=false
+HELP=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --auto)
+            export AUTO_RELEASE=true
+            export AUTO_PUSH=true
+            shift
+            ;;
+        --help|-h)
+            HELP=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            HELP=true
+            shift
+            ;;
+    esac
+done
+
+if [[ "$HELP" == "true" ]]; then
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --dry-run     Show what would be done without making changes"
+    echo "  --auto        Enable automatic release mode (no prompts, auto-push)"
+    echo "  --help, -h    Show this help message"
+    echo ""
+    echo "Environment variables:"
+    echo "  AUTO_RELEASE=true    Skip confirmation prompts"
+    echo "  AUTO_PUSH=true       Automatically push development version"
+    echo ""
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$PROJECT_ROOT/src/jmux-go"
@@ -17,7 +59,28 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}🚀 dmux Release Script${NC}"
+if [[ "$DRY_RUN" == "true" ]]; then
+    echo -e "${YELLOW}(DRY RUN MODE - No changes will be made)${NC}"
+fi
 echo "================================"
+
+# Function to execute command or show what would be executed
+execute_or_show() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY RUN] Would execute: $*${NC}"
+    else
+        "$@"
+    fi
+}
+
+# Function for git commands with dry-run support
+git_execute() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY RUN] Would execute: git $*${NC}"
+    else
+        git "$@"
+    fi
+}
 
 # Check if we're in a git repository
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -55,12 +118,16 @@ else
 fi
 echo -e "${BLUE}Release version: ${RELEASE_VERSION}${NC}"
 
-# Prompt for confirmation
-read -p "$(echo -e "${YELLOW}Create release ${RELEASE_VERSION}? (y/N): ${NC}")" -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo -e "${YELLOW}Release cancelled${NC}"
-    exit 0
+# Prompt for confirmation unless in auto mode
+if [[ "${AUTO_RELEASE:-}" != "true" ]]; then
+    read -p "$(echo -e "${YELLOW}Create release ${RELEASE_VERSION}? (y/N): ${NC}")" -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}Release cancelled${NC}"
+        exit 0
+    fi
+else
+    echo -e "${GREEN}✅ Auto-release mode enabled${NC}"
 fi
 
 echo -e "${BLUE}📝 Updating version for release...${NC}"
@@ -70,7 +137,7 @@ BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 GIT_COMMIT=$(git rev-parse HEAD)
 
 # Backup original version file
-cp "$VERSION_FILE" "${VERSION_FILE}.backup"
+execute_or_show cp "$VERSION_FILE" "${VERSION_FILE}.backup"
 
 # Generate new version file with variable substitution
 cat > "$VERSION_FILE" << EOF
@@ -188,8 +255,8 @@ echo -e "${BLUE}📤 Committing release version...${NC}"
 
 # Commit the version change
 cd "$PROJECT_ROOT"
-git add "$VERSION_FILE"
-git commit -m "Release ${RELEASE_VERSION}
+git_execute add "$VERSION_FILE"
+git_execute commit -m "Release ${RELEASE_VERSION}
 
 🤖 Generated with [Claude Code](https://claude.ai/code)
 
@@ -197,7 +264,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 # Create git tag
 echo -e "${BLUE}🏷️  Creating git tag...${NC}"
-git tag -a "$RELEASE_VERSION" -m "Release ${RELEASE_VERSION}"
+git_execute tag -a "$RELEASE_VERSION" -m "Release ${RELEASE_VERSION}"
 
 echo -e "${BLUE}🚀 Creating GitHub release...${NC}"
 
@@ -209,7 +276,7 @@ if ! command -v gh &> /dev/null; then
     echo "2. Create release on GitHub with the binary"
 else
     # Push the tag
-    git push origin "$RELEASE_VERSION"
+    git_execute push origin "$RELEASE_VERSION"
     
     # Generate release notes
     RELEASE_NOTES="## dmux ${RELEASE_VERSION}
@@ -249,7 +316,7 @@ sudo mv dmux /usr/local/bin/
 🤖 Generated with [Claude Code](https://claude.ai/code)"
 
     # Create GitHub release with enhanced notes
-    gh release create "$RELEASE_VERSION" \
+    execute_or_show gh release create "$RELEASE_VERSION" \
         "$BIN_DIR/dmux" \
         "$BIN_DIR/dmux.sha256" \
         --title "dmux ${RELEASE_VERSION}" \
@@ -307,8 +374,8 @@ func IsDevVersion() bool {
 EOF
 
 # Commit the dev version
-git add "$VERSION_FILE"
-git commit -m "Bump version to ${NEXT_VERSION} for development
+git_execute add "$VERSION_FILE"
+git_execute commit -m "Bump version to ${NEXT_VERSION} for development
 
 🤖 Generated with [Claude Code](https://claude.ai/code)
 
@@ -325,3 +392,12 @@ echo -e "${YELLOW}📝 Next steps:${NC}"
 echo "  • Push the development version: git push origin main"
 echo "  • Test the auto-update: dmux update"
 echo "  • Verify the release: https://github.com/doryashar/jmux/releases"
+
+# Auto-push if enabled
+if [[ "${AUTO_PUSH:-}" == "true" ]]; then
+    echo -e "${BLUE}🚀 Auto-pushing development version...${NC}"
+    git_execute push origin main
+    echo -e "${GREEN}✅ Development version pushed${NC}"
+else
+    echo -e "${YELLOW}💡 To enable auto-push, set AUTO_PUSH=true${NC}"
+fi
