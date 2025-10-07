@@ -362,3 +362,10 @@ if there are more than one ips, write them all in the sessions file so that conn
 
 printf '\e[?1000l\e[?1002l\e[?1003l\e[?1006l'
 or reset
+
+bugs:
+- dmux status can show messages that dmux messages doesn't
+- 'dmux share' from a session should use the current session name.
+- cleanup can't remove stale sessions of other users
+- cleanup should not close sessions that are running in the background and are in the sessions db file
+- dmux monitor stopped working. need to check
