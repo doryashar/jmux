@@ -2,7 +2,13 @@
 package main
 
 import (
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/gob"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -17,12 +23,241 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/creack/pty"
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/ssh/terminal"
 )
 const (
-	JcatVersion = "1.0.0"
+	JcatVersion = "2.0.0"
 	HandshakeMsg = "JCAT/" + JcatVersion + "\n"
+	SecureHandshakeMsg = "JCAT/" + JcatVersion + "+SEC\n"
+	AuthHandshakeMsg = "JCAT/" + JcatVersion + "+AUTH\n"
 )
+
+// Command-line flags
+var (
+	passwordFlag = flag.String("password", "", "Password for authentication and encryption")
+	rawFlag      = flag.Bool("raw", false, "Use password for authentication only, no encryption")
+)
+
+// Security functions
+func generateNonce() ([]byte, error) {
+	nonce := make([]byte, 32)
+	_, err := rand.Read(nonce)
+	return nonce, err
+}
+
+func deriveKey(password string, nonce []byte) []byte {
+	return argon2.IDKey([]byte(password), nonce[:16], 3, 64*1024, 4, 32)
+}
+
+func authenticatePassword(password string, nonce []byte) []byte {
+	key := deriveKey(password, nonce)
+	h := hmac.New(sha256.New, key)
+	h.Write(nonce)
+	return h.Sum(nil)
+}
+
+// EncryptedConnection wraps a net.Conn with ChaCha20-Poly1305 encryption
+type EncryptedConnection struct {
+	conn   net.Conn
+	cipher cipher.AEAD
+	nonce  uint64
+}
+
+func NewEncryptedConnection(conn net.Conn, key []byte) (*EncryptedConnection, error) {
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		return nil, err
+	}
+	
+	return &EncryptedConnection{
+		conn:   conn,
+		cipher: aead,
+		nonce:  0,
+	}, nil
+}
+
+func (ec *EncryptedConnection) Read(b []byte) (n int, err error) {
+	// Read length prefix
+	lengthBytes := make([]byte, 4)
+	if _, err := io.ReadFull(ec.conn, lengthBytes); err != nil {
+		return 0, err
+	}
+	
+	dataLen := int(lengthBytes[0])<<24 | int(lengthBytes[1])<<16 | int(lengthBytes[2])<<8 | int(lengthBytes[3])
+	
+	// Read encrypted data
+	encData := make([]byte, dataLen)
+	if _, err := io.ReadFull(ec.conn, encData); err != nil {
+		return 0, err
+	}
+	
+	// Extract nonce and ciphertext
+	nonceBytes := encData[:12]
+	ciphertext := encData[12:]
+	
+	// Decrypt
+	plaintext, err := ec.cipher.Open(nil, nonceBytes, ciphertext, nil)
+	if err != nil {
+		return 0, err
+	}
+	
+	// Copy to output buffer
+	copy(b, plaintext)
+	return len(plaintext), nil
+}
+
+func (ec *EncryptedConnection) Write(b []byte) (n int, err error) {
+	// Create nonce
+	ec.nonce++
+	nonceBytes := make([]byte, 12)
+	for i := 0; i < 8; i++ {
+		nonceBytes[i] = byte(ec.nonce >> (56 - i*8))
+	}
+	
+	// Encrypt
+	ciphertext := ec.cipher.Seal(nil, nonceBytes, b, nil)
+	
+	// Prepare data with nonce prefix
+	encData := append(nonceBytes, ciphertext...)
+	
+	// Create length prefix
+	dataLen := len(encData)
+	lengthBytes := []byte{
+		byte(dataLen >> 24),
+		byte(dataLen >> 16),
+		byte(dataLen >> 8),
+		byte(dataLen),
+	}
+	
+	// Write length + encrypted data
+	if _, err := ec.conn.Write(lengthBytes); err != nil {
+		return 0, err
+	}
+	if _, err := ec.conn.Write(encData); err != nil {
+		return 0, err
+	}
+	
+	return len(b), nil
+}
+
+func (ec *EncryptedConnection) Close() error {
+	return ec.conn.Close()
+}
+
+func (ec *EncryptedConnection) LocalAddr() net.Addr {
+	return ec.conn.LocalAddr()
+}
+
+func (ec *EncryptedConnection) RemoteAddr() net.Addr {
+	return ec.conn.RemoteAddr()
+}
+
+func (ec *EncryptedConnection) SetDeadline(t time.Time) error {
+	return ec.conn.SetDeadline(t)
+}
+
+func (ec *EncryptedConnection) SetReadDeadline(t time.Time) error {
+	return ec.conn.SetReadDeadline(t)
+}
+
+func (ec *EncryptedConnection) SetWriteDeadline(t time.Time) error {
+	return ec.conn.SetWriteDeadline(t)
+}
+
+// Authentication functions
+func performServerAuth(conn net.Conn, password string) ([]byte, error) {
+	// Generate nonce
+	nonce, err := generateNonce()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %v", err)
+	}
+	
+	// Send challenge
+	challenge := fmt.Sprintf("CHALLENGE:%s\n", base64.StdEncoding.EncodeToString(nonce))
+	if _, err := conn.Write([]byte(challenge)); err != nil {
+		return nil, fmt.Errorf("failed to send challenge: %v", err)
+	}
+	
+	// Read response
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+	
+	response := strings.TrimSpace(string(buffer[:n]))
+	if !strings.HasPrefix(response, "RESPONSE:") {
+		return nil, fmt.Errorf("invalid response format")
+	}
+	
+	responseData, err := base64.StdEncoding.DecodeString(response[9:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+	
+	// Verify response
+	expectedResponse := authenticatePassword(password, nonce)
+	if !hmac.Equal(responseData, expectedResponse) {
+		conn.Write([]byte("AUTH_FAIL\n"))
+		return nil, fmt.Errorf("authentication failed")
+	}
+	
+	// Send success
+	if _, err := conn.Write([]byte("AUTH_OK\n")); err != nil {
+		return nil, fmt.Errorf("failed to send auth success: %v", err)
+	}
+	
+	// Return session key
+	return deriveKey(password, nonce), nil
+}
+
+func performClientAuth(conn net.Conn, password string) ([]byte, error) {
+	// Send auth request
+	authReq := fmt.Sprintf("AUTH:%s\n", password)
+	if _, err := conn.Write([]byte(authReq)); err != nil {
+		return nil, fmt.Errorf("failed to send auth request: %v", err)
+	}
+	
+	// Read challenge
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read challenge: %v", err)
+	}
+	
+	challenge := strings.TrimSpace(string(buffer[:n]))
+	if !strings.HasPrefix(challenge, "CHALLENGE:") {
+		return nil, fmt.Errorf("invalid challenge format")
+	}
+	
+	nonce, err := base64.StdEncoding.DecodeString(challenge[10:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode nonce: %v", err)
+	}
+	
+	// Generate response
+	response := authenticatePassword(password, nonce)
+	responseMsg := fmt.Sprintf("RESPONSE:%s\n", base64.StdEncoding.EncodeToString(response))
+	if _, err := conn.Write([]byte(responseMsg)); err != nil {
+		return nil, fmt.Errorf("failed to send response: %v", err)
+	}
+	
+	// Read result
+	n, err = conn.Read(buffer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read auth result: %v", err)
+	}
+	
+	result := strings.TrimSpace(string(buffer[:n]))
+	if result != "AUTH_OK" {
+		return nil, fmt.Errorf("authentication failed: %s", result)
+	}
+	
+	// Return session key
+	return deriveKey(password, nonce), nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,30 +267,37 @@ func main() {
 
 	command := os.Args[1]
 	
+	// Parse flags after the command
+	args := os.Args[2:]
+	flag.CommandLine.Parse(args)
+	
+	// Get remaining arguments after flag parsing
+	remainingArgs := flag.Args()
+	
 	switch command {
 	case "listen":
 		address := ":1337" // default
-		if len(os.Args) > 2 {
-			address = os.Args[2]
+		if len(remainingArgs) > 0 {
+			address = remainingArgs[0]
 		}
 		runServer(address)
 	case "connect":
-		if len(os.Args) < 3 {
+		if len(remainingArgs) < 1 {
 			log.Fatal("connect command requires host:port argument")
 		}
-		address := os.Args[2]
+		address := remainingArgs[0]
 		runClient(address)
 	case "reverse-listen":
 		address := ":1337" // default
-		if len(os.Args) > 2 {
-			address = os.Args[2]
+		if len(remainingArgs) > 0 {
+			address = remainingArgs[0]
 		}
 		runReverseServer(address)
 	case "reverse-connect":
-		if len(os.Args) < 3 {
+		if len(remainingArgs) < 1 {
 			log.Fatal("reverse-connect command requires host:port argument")
 		}
-		address := os.Args[2]
+		address := remainingArgs[0]
 		runReverseClient(address)
 	case "version":
 		fmt.Printf("jcat version %s\n", JcatVersion)
@@ -72,20 +314,32 @@ func printUsage() {
 	fmt.Printf(`jcat - TCP tunnel for terminal sharing
 
 Usage:
-  jcat listen [port]              Listen on port (default :1337) and share your shell
-  jcat connect <host:port>        Connect to remote host and receive their shell
-  jcat reverse-listen [port]      Listen on port and wait to receive shell from client
-  jcat reverse-connect <host:port> Connect to remote host and share your shell with them
-  jcat version                   Show version
-  jcat help                      Show this help
+  jcat listen [port] [--password <pwd>] [--raw]              Listen on port (default :1337) and share your shell
+  jcat connect <host:port> [--password <pwd>] [--raw]        Connect to remote host and receive their shell
+  jcat reverse-listen [port] [--password <pwd>] [--raw]      Listen on port and wait to receive shell from client
+  jcat reverse-connect <host:port> [--password <pwd>] [--raw] Connect to remote host and share your shell with them
+  jcat version                                              Show version
+  jcat help                                                 Show this help
+
+Flags:
+  --password <pwd>    Password for authentication and encryption
+  --raw              Use password for authentication only, no encryption
 
 Examples:
   # Normal mode (server shares shell with client):
-  jcat listen                    # Listen on default port :1337
-  jcat connect localhost:1337    # Connect and receive server's shell
+  jcat listen                        # Listen on default port :1337
+  jcat connect localhost:1337        # Connect and receive server's shell
+  
+  # Password-protected sessions:
+  jcat listen --password secret123   # Listen with password protection + encryption
+  jcat connect localhost:1337 --password secret123  # Connect with password
+  
+  # Password authentication without encryption:
+  jcat listen --password secret123 --raw            # Auth only, no encryption
+  jcat connect localhost:1337 --password secret123 --raw
   
   # Reverse mode (client shares shell with server):
-  jcat reverse-listen :8080      # Listen and wait for client to share their shell
+  jcat reverse-listen :8080          # Listen and wait for client to share their shell
   jcat reverse-connect localhost:8080 # Connect and share your shell with server
   
   # Equivalent to socat reverse shell:
