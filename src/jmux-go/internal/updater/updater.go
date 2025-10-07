@@ -192,7 +192,7 @@ func isNewerVersion(current, latest string) bool {
 }
 
 // CheckForUpdatesIfNeeded checks for updates if enough time has passed
-func CheckForUpdatesIfNeeded(configDir string) {
+func CheckForUpdatesIfNeeded(configDir string, autoUpdate bool) {
 	// Skip for dev versions unless in debug mode
 	if version.IsDevVersion() && os.Getenv("JMUX_DEBUG_UPDATES") == "" {
 		return
@@ -208,7 +208,7 @@ func CheckForUpdatesIfNeeded(configDir string) {
 
 	// Check for updates in background to avoid blocking startup
 	go func() {
-		checkAndPromptUpdate()
+		checkAndPromptUpdate(autoUpdate)
 	}()
 }
 
@@ -240,8 +240,8 @@ func updateLastCheckTime(configDir string) {
 	os.WriteFile(checkFile, []byte(currentTime), 0644)
 }
 
-// checkAndPromptUpdate checks for updates and prompts user
-func checkAndPromptUpdate() {
+// checkAndPromptUpdate checks for updates and either auto-updates or prompts user
+func checkAndPromptUpdate(autoUpdate bool) {
 	// Quick check for latest release
 	release, err := getLatestRelease()
 	if err != nil {
@@ -261,27 +261,43 @@ func checkAndPromptUpdate() {
 		return // Current version is newer
 	}
 
-	// Update is available - prompt user
+	// Update is available
 	color.Yellow("\n🔔 Update Available!")
 	color.Cyan("  Current version: %s", currentVersion)
 	color.Cyan("  Latest version:  %s", latestVersion)
-	color.Blue("  Run 'dmux update' to upgrade")
 	
-	// Ask if user wants to update now
-	fmt.Print("\n" + color.YellowString("Would you like to update now? (y/N): "))
-	
-	var response string
-	fmt.Scanln(&response)
-	
-	if strings.ToLower(strings.TrimSpace(response)) == "y" {
-		color.Blue("\n📥 Updating...")
+	if autoUpdate {
+		// Auto-update without prompting
+		color.Blue("  Auto-updating...")
 		err := CheckAndUpdate(false)
 		if err != nil {
-			color.Red("❌ Update failed: %v", err)
+			color.Red("❌ Auto-update failed: %v", err)
 			color.Blue("💡 You can try again later with 'dmux update'")
+			color.Blue("💡 To disable auto-updates, set DMUX_AUTO_UPDATE=false")
+		} else {
+			color.Green("✅ Successfully auto-updated!")
+			color.Blue("💡 To disable auto-updates, set DMUX_AUTO_UPDATE=false")
 		}
 	} else {
-		color.Blue("💡 You can update anytime with 'dmux update'")
+		// Prompt user
+		color.Blue("  Run 'dmux update' to upgrade")
+		
+		// Ask if user wants to update now
+		fmt.Print("\n" + color.YellowString("Would you like to update now? (y/N): "))
+		
+		var response string
+		fmt.Scanln(&response)
+		
+		if strings.ToLower(strings.TrimSpace(response)) == "y" {
+			color.Blue("\n📥 Updating...")
+			err := CheckAndUpdate(false)
+			if err != nil {
+				color.Red("❌ Update failed: %v", err)
+				color.Blue("💡 You can try again later with 'dmux update'")
+			}
+		} else {
+			color.Blue("💡 You can update anytime with 'dmux update'")
+		}
 	}
 	fmt.Println()
 }

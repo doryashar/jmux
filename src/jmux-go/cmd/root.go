@@ -183,7 +183,7 @@ func initializeSystem() {
 
 	// Check for updates if needed (skip in tmux to avoid hanging)
 	if !tmuxMgr.IsInTmuxSession() {
-		updater.CheckForUpdatesIfNeeded(cfg.ConfigDir)
+		updater.CheckForUpdatesIfNeeded(cfg.ConfigDir, cfg.AutoUpdate)
 	}
 }
 

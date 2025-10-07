@@ -26,6 +26,7 @@ type Config struct {
 	MonitorPIDFile         string
 	MonitorLogFile         string
 	MessageDisplayMethod   string // "kdialog", "terminal", "tmux"
+	AutoUpdate             bool   // Whether to auto-update without prompting
 	Security               *security.SecurityConfig
 }
 
@@ -51,6 +52,7 @@ func DefaultConfig() *Config {
 		MonitorPIDFile:         filepath.Join("/tmp", "dmux-monitor-"+os.Getenv("USER")+".pid"),
 		MonitorLogFile:         filepath.Join(configDir, "monitor.log"),
 		MessageDisplayMethod:   getEnvOrDefault("DMUX_MESSAGE_DISPLAY", "auto"),
+		AutoUpdate:             getEnvOrDefaultBool("DMUX_AUTO_UPDATE", true), // Auto-update by default
 		Security:               security.DefaultSecurityConfig(),
 	}
 }

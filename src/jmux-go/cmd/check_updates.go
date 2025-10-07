@@ -12,8 +12,8 @@ var checkUpdatesCmd = &cobra.Command{
 	Long:   `Check if there are any updates available without installing them.`,
 	Hidden: true, // Hidden command for testing
 	Run: func(cmd *cobra.Command, args []string) {
-		// Force a check regardless of timing
-		updater.CheckForUpdatesIfNeeded(cfg.ConfigDir)
+		// Force a check regardless of timing - use auto-update setting
+		updater.CheckForUpdatesIfNeeded(cfg.ConfigDir, cfg.AutoUpdate)
 	},
 }
 
