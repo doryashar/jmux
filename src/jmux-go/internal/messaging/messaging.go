@@ -150,7 +150,7 @@ func (m *Messaging) tailUserMessages(userMessageFile string) {
 // tailUserInvites monitors a user's invites file using tail-like approach  
 func (m *Messaging) tailUserInvites(userInvitesFile string) {
 	if m.logger != nil {
-		m.logger.Debug("Starting tail monitoring for invites: %s", userInvitesFile)
+		m.logger.Info("Starting tail monitoring for invites: %s", userInvitesFile)
 	}
 
 	// Ensure the invites file exists with proper permissions
@@ -185,6 +185,10 @@ func (m *Messaging) tailUserInvites(userInvitesFile string) {
 
 	ticker := time.NewTicker(500 * time.Millisecond) // Poll every 500ms like messages
 	defer ticker.Stop()
+	
+	// Cleanup timer - run every 10 minutes to remove expired invitations
+	cleanupTicker := time.NewTicker(10 * time.Minute)
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
@@ -193,6 +197,14 @@ func (m *Messaging) tailUserInvites(userInvitesFile string) {
 				if m.logger != nil {
 					m.logger.Debug("Error checking for new invites: %v", err)
 				}
+			}
+		case <-cleanupTicker.C:
+			if err := m.cleanupExpiredInvitations(userInvitesFile); err != nil {
+				if m.logger != nil {
+					m.logger.Debug("Error cleaning up expired invitations: %v", err)
+				}
+			} else if m.logger != nil {
+				m.logger.Debug("Performed invitation cleanup check")
 			}
 		case <-m.done:
 			if m.logger != nil {
@@ -251,18 +263,139 @@ func (m *Messaging) checkForNewInvites(userInvitesFile string, lastSize *int64) 
 		}
 	}
 
-	// Clear the file after processing all invitations (monitor consumes them)
+	// For monitor mode, don't clear the file - invitations should persist until accepted/expired
+	// The monitor just displays them, but they remain available for manual processing
 	if len(invitations) > 0 {
-		if err := os.Truncate(userInvitesFile, 0); err != nil {
-			if m.logger != nil {
-				m.logger.Debug("Could not clear invites file after processing: %v", err)
-			}
-		} else {
-			if m.logger != nil {
-				m.logger.Info("Cleared %d processed invitations from file", len(invitations))
-			}
-			*lastSize = 0 // Reset size tracking after clearing
+		if m.logger != nil {
+			m.logger.Info("Processed %d invitations (kept in file for manual handling)", len(invitations))
 		}
+	}
+
+	return nil
+}
+
+// cleanupExpiredInvitations removes invitations older than 24 hours
+func (m *Messaging) cleanupExpiredInvitations(userInvitesFile string) error {
+	if _, err := os.Stat(userInvitesFile); os.IsNotExist(err) {
+		return nil // File doesn't exist, nothing to clean
+	}
+
+	file, err := os.Open(userInvitesFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var validInvitations []Message
+	currentTime := time.Now().Unix()
+	expirationTime := int64(24 * 60 * 60) // 24 hours in seconds
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			var invite Message
+			if err := json.Unmarshal([]byte(line), &invite); err != nil {
+				// Skip malformed invitations
+				continue
+			}
+			
+			// Keep invitations that are less than 24 hours old
+			if currentTime-invite.Timestamp < expirationTime {
+				validInvitations = append(validInvitations, invite)
+			} else if m.logger != nil {
+				m.logger.Info("Expired invitation removed: from=%s timestamp=%d", invite.From, invite.Timestamp)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	// Rewrite the file with only valid invitations
+	return m.rewriteInvitationsFile(userInvitesFile, validInvitations)
+}
+
+// rewriteInvitationsFile rewrites the invitations file with the given invitations
+func (m *Messaging) rewriteInvitationsFile(userInvitesFile string, invitations []Message) error {
+	// Create temp file for atomic write
+	tempFile := userInvitesFile + ".tmp"
+	
+	file, err := os.OpenFile(tempFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Write all valid invitations
+	for _, invite := range invitations {
+		inviteJSON, err := json.Marshal(invite)
+		if err != nil {
+			continue // Skip malformed invitations
+		}
+		file.WriteString(string(inviteJSON) + "\n")
+	}
+
+	// Atomic move
+	if err := os.Rename(tempFile, userInvitesFile); err != nil {
+		os.Remove(tempFile) // Clean up temp file on error
+		return err
+	}
+
+	return nil
+}
+
+// RemoveInvitationFromUser removes invitations from a specific user (public method)
+func (m *Messaging) RemoveInvitationFromUser(fromUser string) error {
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		return fmt.Errorf("unable to determine current user")
+	}
+
+	userInvitesFile := filepath.Join(m.config.MessagesDir, currentUser+".invites")
+	
+	if _, err := os.Stat(userInvitesFile); os.IsNotExist(err) {
+		return nil // File doesn't exist, nothing to remove
+	}
+
+	file, err := os.Open(userInvitesFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var remainingInvitations []Message
+	removedCount := 0
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			var invite Message
+			if err := json.Unmarshal([]byte(line), &invite); err != nil {
+				// Keep malformed invitations to avoid data loss
+				continue
+			}
+			
+			// Keep invitations that are NOT from the specified user
+			if invite.From != fromUser {
+				remainingInvitations = append(remainingInvitations, invite)
+			} else {
+				removedCount++
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	if removedCount > 0 {
+		if m.logger != nil {
+			m.logger.Info("Removed %d invitations from %s", removedCount, fromUser)
+		}
+		return m.rewriteInvitationsFile(userInvitesFile, remainingInvitations)
 	}
 
 	return nil
@@ -674,18 +807,15 @@ func (m *Messaging) ReadMessages() error {
 
 	fmt.Println()
 
-	// Clear both files by truncating them
+	// Clear messages file but keep invitations (they should persist until accepted)
 	if _, err := os.Stat(userMessageFile); err == nil {
 		if err := os.Truncate(userMessageFile, 0); err != nil {
 			return fmt.Errorf("failed to clear messages: %v", err)
 		}
 	}
 	
-	if _, err := os.Stat(userInvitesFile); err == nil {
-		if err := os.Truncate(userInvitesFile, 0); err != nil {
-			return fmt.Errorf("failed to clear invites: %v", err)
-		}
-	}
+	// Don't clear invitations - they should persist until accepted or expired
+	// Users can manually clear them by joining sessions or they'll auto-expire after 24h
 
 	return nil
 }
@@ -879,7 +1009,18 @@ func (m *Messaging) displayKDialogMessage(msg *Message) {
 	
 	// Run kdialog in background so it doesn't block
 	go func() {
-		if err := cmd.Run(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+		if err := cmd.Run(); err == nil {
+			// If it was an invite and user clicked yes, open terminal
+			if msg.Type == MessageTypeInvite {
+				if os.Getenv("DMUX_DEBUG") != "" {
+					fmt.Printf("[DEBUG] User clicked yes\n")
+				}
+				terminalCmd := exec.Command("x-terminal-emulator", "-e", "bash", "-c", fmt.Sprintf("dmux join %s; exec bash", msg.From))
+				if err := terminalCmd.Start(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+					fmt.Printf("[DEBUG] Failed to open terminal for joining: %v\n", err)
+				}
+			}
+		} else if msg.Type != MessageTypeInvite && os.Getenv("DMUX_DEBUG") != "" {
 			fmt.Printf("[DEBUG] Failed to display kdialog message: %v\n", err)
 		}
 	}()

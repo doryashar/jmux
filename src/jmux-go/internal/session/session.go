@@ -333,7 +333,8 @@ func (m *Manager) sendInvitationsAndDisplaySuccess(session *Session, inviteUsers
 		for _, user := range inviteUsers {
 			inviteMessage := fmt.Sprintf("You're invited to join dmux session '%s' at port %d (mode: %s)", sessionName, port, mode)
 			if m.messaging != nil {
-				if err := m.messaging.SendMessage(user, "INVITE", inviteMessage); err != nil {
+				// if err := m.messaging.SendMessage(user, "INVITE", inviteMessage); err != nil {
+				if err := m.messaging.SendInvitation(user, inviteMessage); err != nil {
 					color.Yellow("Warning: Failed to send invitation to %s: %v", user, err)
 				} else {
 					color.Green("📨 Invitation sent to %s", user)

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	
 	"github.com/spf13/cobra"
 )
 
@@ -58,6 +60,16 @@ Examples:
 			cmd.Printf("Tip: Try 'dmux sessions' to see available sessions\n")
 			cmd.Printf("Usage: dmux join <host-user> [session-name]\n")
 			return
+		}
+
+		// Remove invitations from this user after successful join
+		if msgSystem != nil {
+			if err := msgSystem.RemoveInvitationFromUser(hostUser); err != nil {
+				// Don't fail the join if invitation removal fails
+				if os.Getenv("DMUX_DEBUG") != "" {
+					cmd.Printf("Warning: Could not remove invitation from %s: %v\n", hostUser, err)
+				}
+			}
 		}
 	},
 }
