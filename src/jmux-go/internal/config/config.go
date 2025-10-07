@@ -25,7 +25,7 @@ type Config struct {
 	WatcherPIDFile         string
 	MonitorPIDFile         string
 	MonitorLogFile         string
-	MessageDisplayMethod   string // "kdialog", "terminal", "tmux"
+	MessageDisplayMethod   string // "zenity", "kdialog", "notify", "terminal", "tmux", "auto"
 	AutoUpdate             bool   // Whether to auto-update without prompting
 	Security               *security.SecurityConfig
 }

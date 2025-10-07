@@ -565,6 +565,11 @@ func (m *Messaging) handleNewMessage(msgFile string) {
 
 	// Display message using configured method
 	switch m.config.MessageDisplayMethod {
+	case "zenity":
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("zenity")
+		}
+		m.displayZenityMessage(msg)
 	case "kdialog":
 		if m.logger != nil {
 			m.logger.LogDisplayMethod("kdialog")
@@ -1026,6 +1031,91 @@ func (m *Messaging) displayKDialogMessage(msg *Message) {
 	}()
 }
 
+// displayZenityMessage shows the message using zenity
+func (m *Messaging) displayZenityMessage(msg *Message) {
+	// Check if zenity is available
+	if _, err := exec.LookPath("zenity"); err != nil {
+		if os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] zenity not found, falling back to terminal display\n")
+		}
+		m.displayRealtimeMessage(msg)
+		return
+	}
+
+	var title, text string
+	var dialogType string = "--info"
+	
+	switch msg.Type {
+	case MessageTypeInvite:
+		title = "dmux - Session Invitation"
+		text = fmt.Sprintf("📨 Invitation from %s\n\nJoin session: %s\n\nTo join, run: dmux join %s", msg.From, msg.Data, msg.From)
+		dialogType = "--question"
+	case MessageTypeUrgent:
+		title = "dmux - Urgent Message"
+		text = fmt.Sprintf("🚨 URGENT from %s\n\n%s", msg.From, msg.Data)
+		dialogType = "--warning"
+	default:
+		title = "dmux - Message"
+		text = fmt.Sprintf("💬 Message from %s\n\n%s", msg.From, msg.Data)
+		dialogType = "--info"
+	}
+
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Displaying zenity message: %s\n", text)
+	}
+
+	// Build zenity command
+	args := []string{
+		dialogType,
+		"--title", title,
+		"--text", text,
+		"--width", "400",
+		"--height", "200",
+	}
+	
+	// Add message type specific options
+	switch msg.Type {
+	case MessageTypeUrgent:
+		args = append(args, 
+			"--icon-name", "dialog-warning",
+			"--timeout", "10") // Auto-close after 10 seconds for urgent
+	case MessageTypeInvite:
+		args = append(args, 
+			"--icon-name", "mail-message",
+			"--ok-label", "Join Session",
+			"--cancel-label", "Dismiss")
+	default:
+		args = append(args, 
+			"--icon-name", "dialog-information",
+			"--timeout", "8") // Auto-close after 8 seconds for regular messages
+	}
+
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Displaying zenity with args: %v\n", args)
+	}
+
+	// Display the dialog
+	cmd := exec.Command("zenity", args...)
+	
+	// Run zenity in background so it doesn't block
+	go func() {
+		if err := cmd.Run(); err == nil {
+			// If it was an invite and user clicked OK, open terminal
+			if msg.Type == MessageTypeInvite {
+				if os.Getenv("DMUX_DEBUG") != "" {
+					fmt.Printf("[DEBUG] User clicked Join Session\n")
+				}
+				terminalCmd := exec.Command("x-terminal-emulator", "-e", "bash", "-c", fmt.Sprintf("dmux join %s; exec bash", msg.From))
+				if err := terminalCmd.Start(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+					fmt.Printf("[DEBUG] Failed to open terminal for joining: %v\n", err)
+				}
+			}
+		} else if msg.Type != MessageTypeInvite && os.Getenv("DMUX_DEBUG") != "" {
+			fmt.Printf("[DEBUG] Failed to display zenity message: %v\n", err)
+		}
+	}()
+}
+
 // displayNotifyMessage shows the message using notify-send
 func (m *Messaging) displayNotifyMessage(msg *Message) {
 	// Check if notify-send is available
@@ -1075,7 +1165,15 @@ func (m *Messaging) displayAutoMessage(msg *Message) {
 		m.logger.Debug("Auto-detecting best display method")
 	}
 
-	// Priority order: kdialog -> notify-send -> tmux -> terminal
+	// Priority order: zenity -> kdialog -> notify-send -> tmux -> terminal
+	if _, err := exec.LookPath("zenity"); err == nil {
+		if m.logger != nil {
+			m.logger.LogDisplayMethod("zenity (auto-detected)")
+		}
+		m.displayZenityMessage(msg)
+		return
+	}
+	
 	if _, err := exec.LookPath("kdialog"); err == nil {
 		if m.logger != nil {
 			m.logger.LogDisplayMethod("kdialog (auto-detected)")
