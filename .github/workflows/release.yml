@@ -1,0 +1,71 @@
+name: Automated Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+        - auto
+        - patch
+        - minor
+        - major
+      dry_run:
+        description: 'Dry run (preview only)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for release notes
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Install GitHub CLI
+      run: |
+        sudo apt-get update
+        sudo apt-get install gh
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+    
+    - name: Run release script
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        AUTO_RELEASE: true
+        AUTO_PUSH: true
+      run: |
+        chmod +x ./scripts/release.sh
+        if [ "${{ inputs.dry_run }}" = "true" ]; then
+          ./scripts/release.sh --dry-run
+        else
+          ./scripts/release.sh --auto
+        fi
+    
+    - name: Summary
+      run: |
+        echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Type**: ${{ inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Dry Run**: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ inputs.dry_run }}" = "false" ]; then
+          echo "- **Status**: ✅ Release completed" >> $GITHUB_STEP_SUMMARY
+          echo "- **Next**: Check [releases page](https://github.com/doryashar/jmux/releases)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Status**: 🔍 Dry run completed (no changes made)" >> $GITHUB_STEP_SUMMARY
+        fi
