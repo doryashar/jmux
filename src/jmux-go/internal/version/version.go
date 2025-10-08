@@ -7,9 +7,9 @@ import (
 
 // Version information - will be set at build time
 var (
-	Version   = "v1.4.2-dev"
-	GitCommit = "unknown"
-	BuildTime = "unknown"
+	Version   = "v1.4.2"
+	GitCommit = "da855ffa3c751cf610adb51a1beaa3bb272168f6"
+	BuildTime = "2025-10-08 05:34:47 UTC"
 	GoVersion = runtime.Version()
 )
 
