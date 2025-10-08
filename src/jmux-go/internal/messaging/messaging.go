@@ -401,6 +401,138 @@ func (m *Messaging) RemoveInvitationFromUser(fromUser string) error {
 	return nil
 }
 
+// findDmuxExecutable finds the dmux executable with full path
+func findDmuxExecutable() string {
+	// First try to find dmux in PATH
+	if dmuxPath, err := exec.LookPath("dmux"); err == nil {
+		return dmuxPath
+	}
+	
+	// Try current executable's directory (if we're running from dmux)
+	if currentExe, err := os.Executable(); err == nil {
+		if strings.Contains(currentExe, "dmux") {
+			return currentExe
+		}
+		// Try dmux in the same directory as current executable
+		dmuxPath := filepath.Join(filepath.Dir(currentExe), "dmux")
+		if _, err := os.Stat(dmuxPath); err == nil {
+			return dmuxPath
+		}
+	}
+	
+	// Try common installation locations
+	commonPaths := []string{
+		"/usr/local/bin/dmux",
+		"/usr/bin/dmux", 
+		filepath.Join(os.Getenv("HOME"), ".local/bin/dmux"),
+		filepath.Join(os.Getenv("HOME"), "bin/dmux"),
+	}
+	
+	for _, path := range commonPaths {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	
+	// Fallback to just "dmux" and hope it's in PATH when terminal starts
+	return "dmux"
+}
+
+// findTerminalEmulator finds an available terminal emulator
+func findTerminalEmulator() (string, []string) {
+	// Define terminal emulators with their execute argument patterns
+	terminals := []struct {
+		cmd  string
+		args []string
+	}{
+		{"konsole", []string{"-e"}},
+		{"gnome-terminal", []string{"--"}},
+		{"xfce4-terminal", []string{"-e"}},
+		{"mate-terminal", []string{"-e"}},
+		{"xterm", []string{"-e"}},
+		{"urxvt", []string{"-e"}},
+		{"terminator", []string{"-e"}},
+		{"tilix", []string{"-e"}},
+		{"alacritty", []string{"-e"}},
+		{"kitty", []string{"-e"}},
+		{"x-terminal-emulator", []string{"-e"}},
+	}
+	
+	// Check which terminals are available
+	for _, term := range terminals {
+		if _, err := exec.LookPath(term.cmd); err == nil {
+			return term.cmd, term.args
+		}
+	}
+	
+	// Fallback to x-terminal-emulator with -e
+	return "x-terminal-emulator", []string{"-e"}
+}
+
+// launchTerminalForJoin launches a terminal to join a session
+func (m *Messaging) launchTerminalForJoin(fromUser string) error {
+	dmuxPath := findDmuxExecutable()
+	termCmd, termArgs := findTerminalEmulator()
+	
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Using dmux path: %s\n", dmuxPath)
+		fmt.Printf("[DEBUG] Using terminal: %s %v\n", termCmd, termArgs)
+	}
+	
+	// Build the command to run in the terminal
+	// Use absolute path to dmux and add common paths to environment
+	joinCommand := fmt.Sprintf("export PATH=\"$PATH:/usr/local/bin:/usr/bin:$HOME/.local/bin:$HOME/bin\"; %s join %s; exec bash", dmuxPath, fromUser)
+	
+	// Build the full terminal command
+	var args []string
+	args = append(args, termArgs...)
+	args = append(args, "bash", "-c", joinCommand)
+	
+	if os.Getenv("DMUX_DEBUG") != "" {
+		fmt.Printf("[DEBUG] Terminal command: %s %v\n", termCmd, args)
+	}
+	
+	// Launch the terminal
+	cmd := exec.Command(termCmd, args...)
+	
+	// Set environment to include common paths
+	env := os.Environ()
+	currentPath := os.Getenv("PATH")
+	enhancedPath := currentPath + ":/usr/local/bin:/usr/bin:" + 
+		filepath.Join(os.Getenv("HOME"), ".local/bin") + ":" + 
+		filepath.Join(os.Getenv("HOME"), "bin")
+	
+	// Update PATH in environment
+	var newEnv []string
+	pathSet := false
+	for _, envVar := range env {
+		if strings.HasPrefix(envVar, "PATH=") {
+			newEnv = append(newEnv, "PATH="+enhancedPath)
+			pathSet = true
+		} else {
+			newEnv = append(newEnv, envVar)
+		}
+	}
+	if !pathSet {
+		newEnv = append(newEnv, "PATH="+enhancedPath)
+	}
+	
+	cmd.Env = newEnv
+	
+	if err := cmd.Start(); err != nil {
+		if m.logger != nil {
+			m.logger.Debug("Failed to launch terminal for joining %s: %v", fromUser, err)
+		}
+		return err
+	}
+	
+	if m.logger != nil {
+		m.logger.Info("Launched terminal for joining %s session", fromUser)
+	}
+	
+	return nil
+}
+
 // checkForNewMessages checks if the file has new messages and processes them
 func (m *Messaging) checkForNewMessages(userMessageFile string, lastSize *int64) error {
 	stat, err := os.Stat(userMessageFile)
@@ -1020,8 +1152,7 @@ func (m *Messaging) displayKDialogMessage(msg *Message) {
 				if os.Getenv("DMUX_DEBUG") != "" {
 					fmt.Printf("[DEBUG] User clicked yes\n")
 				}
-				terminalCmd := exec.Command("x-terminal-emulator", "-e", "bash", "-c", fmt.Sprintf("dmux join %s; exec bash", msg.From))
-				if err := terminalCmd.Start(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+				if err := m.launchTerminalForJoin(msg.From); err != nil && os.Getenv("DMUX_DEBUG") != "" {
 					fmt.Printf("[DEBUG] Failed to open terminal for joining: %v\n", err)
 				}
 			}
@@ -1099,14 +1230,19 @@ func (m *Messaging) displayZenityMessage(msg *Message) {
 	
 	// Run zenity in background so it doesn't block
 	go func() {
-		if err := cmd.Run(); err == nil {
+		err := cmd.Run()
+
+		if m.logger != nil {
+			m.logger.Debug("User response from zenity: %v", err)
+		}
+
+		if err == nil {
 			// If it was an invite and user clicked OK, open terminal
 			if msg.Type == MessageTypeInvite {
 				if os.Getenv("DMUX_DEBUG") != "" {
 					fmt.Printf("[DEBUG] User clicked Join Session\n")
 				}
-				terminalCmd := exec.Command("x-terminal-emulator", "-e", "bash", "-c", fmt.Sprintf("dmux join %s; exec bash", msg.From))
-				if err := terminalCmd.Start(); err != nil && os.Getenv("DMUX_DEBUG") != "" {
+				if err := m.launchTerminalForJoin(msg.From); err != nil && os.Getenv("DMUX_DEBUG") != "" {
 					fmt.Printf("[DEBUG] Failed to open terminal for joining: %v\n", err)
 				}
 			}
