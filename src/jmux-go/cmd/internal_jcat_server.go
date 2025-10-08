@@ -8,7 +8,10 @@ import (
 	"jmux/internal/jcat"
 )
 
-var secureFlag bool
+var (
+	secureFlag     bool
+	connectionLimit int
+)
 
 // internalJcatServerCmd is a hidden command to run jcat server inside tmux
 var internalJcatServerCmd = &cobra.Command{
@@ -28,12 +31,12 @@ var internalJcatServerCmd = &cobra.Command{
 		
 		// Start the appropriate server type
 		if secureFlag && cfg != nil && cfg.Security.Enabled {
-			secureServer := jcat.NewSecureServer(fmt.Sprintf(":%d", port), setSizeScript, cfg.Security)
+			secureServer := jcat.NewSecureServerWithLimit(fmt.Sprintf(":%d", port), setSizeScript, cfg.Security, connectionLimit)
 			if err := secureServer.Start(); err != nil {
 				fmt.Printf("secure jcat server error: %v\n", err)
 			}
 		} else {
-			server := jcat.NewServer(fmt.Sprintf(":%d", port), setSizeScript)
+			server := jcat.NewServerWithLimit(fmt.Sprintf(":%d", port), setSizeScript, connectionLimit)
 			if err := server.Start(); err != nil {
 				fmt.Printf("jcat server error: %v\n", err)
 			}
@@ -44,4 +47,5 @@ var internalJcatServerCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(internalJcatServerCmd)
 	internalJcatServerCmd.Flags().BoolVar(&secureFlag, "secure", false, "Start secure server")
+	internalJcatServerCmd.Flags().IntVar(&connectionLimit, "limit", 0, "Connection limit (0 = unlimited)")
 }

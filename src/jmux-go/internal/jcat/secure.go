@@ -32,6 +32,14 @@ func NewSecureServer(listenAddr, rcfile string, securityConfig *security.Securit
 	}
 }
 
+// NewSecureServerWithLimit creates a new secure jcat server with connection limit
+func NewSecureServerWithLimit(listenAddr, rcfile string, securityConfig *security.SecurityConfig, limit int) *SecureServer {
+	return &SecureServer{
+		Server: NewServerWithLimit(listenAddr, rcfile, limit),
+		auth:   security.NewPasswordAuth(securityConfig),
+	}
+}
+
 // NewSecureClient creates a new secure jcat client
 func NewSecureClient(connectAddr string, securityConfig *security.SecurityConfig) *SecureClient {
 	return &SecureClient{

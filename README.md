@@ -355,6 +355,7 @@ This project is provided as-is for internal use.
 [ ] Debug invite messages propagation?
 [ ] join-share spaces fix 
 [ ] Validate reverse join-share from tmux and from terminal
+[ ] Add 'dmux stop all'
 
 when host detach the sharing is done - why?
 if running share with name but the session name exists. if this session is not in share make it share. if no name was given a new session should be created

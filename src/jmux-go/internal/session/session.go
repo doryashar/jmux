@@ -29,6 +29,8 @@ type Session struct {
 	AllowedUsers []string
 	Mode      string // "pair", "view", or "rogue"
 	IsReverse bool   // true if this is reverse sharing (client listening)
+	ConnectionLimit int // maximum number of connections (0 = unlimited)
+	ActiveConnections int // current number of active connections
 }
 
 // Manager handles session management
@@ -46,7 +48,7 @@ func NewManager(cfg *config.Config, msg *messaging.Messaging) *Manager {
 }
 
 // StartShare starts sharing a tmux session
-func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []string, mode string) error {
+func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []string, mode string, connectionLimit int) error {
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
 		return fmt.Errorf("unable to determine current user")
@@ -89,12 +91,14 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 		Private:      private,
 		AllowedUsers: inviteUsers,
 		Mode:         mode,
+		ConnectionLimit: connectionLimit,
+		ActiveConnections: 0,
 	}
 
 	// If already in tmux, start the server in background
 	if m.isInTmuxSession() {
 		// Start server first, then register on success
-		if err := m.startServerInBackground(port); err != nil {
+		if err := m.startServerInBackground(port, connectionLimit); err != nil {
 			return err
 		}
 		
@@ -145,6 +149,11 @@ func (m *Manager) StartShare(sessionName string, private bool, inviteUsers []str
 	// Add security flag if enabled
 	if m.config.Security.Enabled {
 		args = append(args, "--secure")
+	}
+	
+	// Add connection limit if specified
+	if connectionLimit > 0 {
+		args = append(args, "--limit", fmt.Sprintf("%d", connectionLimit))
 	}
 
 	// Create the command string for tmux
@@ -822,7 +831,7 @@ func (m *Manager) readPortMappings() ([]string, error) {
 }
 
 // startServerInBackground starts the jcat server within the tmux session context
-func (m *Manager) startServerInBackground(port int) error {
+func (m *Manager) startServerInBackground(port int, connectionLimit int) error {
 	// Get current tmux session name
 	currentSession, err := m.getCurrentTmuxSession()
 	if err != nil {
@@ -844,6 +853,11 @@ func (m *Manager) startServerInBackground(port int) error {
 	// Add security flag if enabled
 	if m.config.Security.Enabled {
 		args = append(args, "--secure")
+	}
+	
+	// Add connection limit if specified
+	if connectionLimit > 0 {
+		args = append(args, "--limit", fmt.Sprintf("%d", connectionLimit))
 	}
 
 	// Set environment variable for the tmux session

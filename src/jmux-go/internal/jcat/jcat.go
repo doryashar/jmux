@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -28,6 +29,10 @@ const (
 type Server struct {
 	listenAddr string
 	rcfile     string
+	connectionLimit int
+	activeConnections int
+	connectionMutex sync.Mutex
+	listener net.Listener
 }
 
 // Client represents a jcat client
@@ -41,6 +46,16 @@ func NewServer(listenAddr, rcfile string) *Server {
 	return &Server{
 		listenAddr: listenAddr,
 		rcfile:     rcfile,
+		connectionLimit: 0, // 0 = unlimited
+	}
+}
+
+// NewServerWithLimit creates a new jcat server with connection limit
+func NewServerWithLimit(listenAddr, rcfile string, limit int) *Server {
+	return &Server{
+		listenAddr: listenAddr,
+		rcfile:     rcfile,
+		connectionLimit: limit,
 	}
 }
 
@@ -66,7 +81,13 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("jcat server listening on %s", s.listenAddr)
+	s.listener = ln
+	
+	if s.connectionLimit > 0 {
+		log.Printf("jcat server listening on %s (max %d connections)", s.listenAddr, s.connectionLimit)
+	} else {
+		log.Printf("jcat server listening on %s", s.listenAddr)
+	}
 
 	for {
 		conn, err := ln.Accept()
@@ -74,8 +95,57 @@ func (s *Server) Start() error {
 			log.Printf("accept error: %v", err)
 			continue
 		}
-		go s.handle(conn)
+		
+		// Check connection limit
+		s.connectionMutex.Lock()
+		if s.connectionLimit > 0 && s.activeConnections >= s.connectionLimit {
+			s.connectionMutex.Unlock()
+			log.Printf("connection limit reached (%d), rejecting connection", s.connectionLimit)
+			conn.Close()
+			continue
+		}
+		s.activeConnections++
+		currentConnections := s.activeConnections
+		s.connectionMutex.Unlock()
+		
+		log.Printf("new connection accepted (%d/%d)", currentConnections, s.connectionLimit)
+		go s.handleWithTracking(conn)
 	}
+}
+
+// Stop stops the jcat server
+func (s *Server) Stop() error {
+	if s.listener != nil {
+		return s.listener.Close()
+	}
+	return nil
+}
+
+// GetActiveConnections returns the current number of active connections
+func (s *Server) GetActiveConnections() int {
+	s.connectionMutex.Lock()
+	defer s.connectionMutex.Unlock()
+	return s.activeConnections
+}
+
+// ShouldRestart returns true if the server should restart based on connection count
+func (s *Server) ShouldRestart() bool {
+	s.connectionMutex.Lock()
+	defer s.connectionMutex.Unlock()
+	return s.connectionLimit > 0 && s.activeConnections < s.connectionLimit
+}
+
+// handleWithTracking wraps the handle method with connection tracking
+func (s *Server) handleWithTracking(conn net.Conn) {
+	defer func() {
+		s.connectionMutex.Lock()
+		s.activeConnections--
+		currentConnections := s.activeConnections
+		s.connectionMutex.Unlock()
+		log.Printf("connection closed (%d/%d)", currentConnections, s.connectionLimit)
+	}()
+	
+	s.handle(conn)
 }
 
 // Connect connects the jcat client

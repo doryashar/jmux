@@ -12,6 +12,7 @@ var (
 	shareRogue   bool
 	sharePassword string
 	shareSecure   bool
+	shareLimit   int
 )
 
 // shareCmd represents the share command
@@ -37,7 +38,8 @@ Examples:
   dmux share --rogue                      # Share in rogue mode (independent sessions)
   dmux share --private --invite user1,user2  # Private session with invites
   dmux share --secure --password mypass   # Secure encrypted session
-  dmux share --secure                     # Secure session with config password`,
+  dmux share --secure                     # Secure session with config password
+  dmux share --limit 5                    # Limit to 5 jcat connections`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine session name: --name flag takes precedence over positional argument
 		sessionName := ""
@@ -95,7 +97,7 @@ Examples:
 			}()
 		}
 
-		err := sessMgr.StartShare(sessionName, sharePrivate, shareInvite, shareMode)
+		err := sessMgr.StartShare(sessionName, sharePrivate, shareInvite, shareMode, shareLimit)
 		if err != nil {
 			cmd.Printf("Error starting share: %v\n", err)
 			return
@@ -113,4 +115,5 @@ func init() {
 	shareCmd.Flags().BoolVar(&shareRogue, "rogue", false, "Share in rogue mode (independent control for joining users)")
 	shareCmd.Flags().BoolVar(&shareSecure, "secure", false, "Enable encrypted session (requires password)")
 	shareCmd.Flags().StringVar(&sharePassword, "password", "", "Password for secure session")
+	shareCmd.Flags().IntVar(&shareLimit, "limit", 0, "Limit number of jcat connections (0 = unlimited)")
 }

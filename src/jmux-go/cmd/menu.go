@@ -457,7 +457,7 @@ func startSharing() {
 		sessionName, _ := tmuxMgr.GetCurrentSession()
 		color.Blue("Starting sharing for session: %s", sessionName)
 		
-		err := sessMgr.StartShare(sessionName, false, []string{}, "pair")
+		err := sessMgr.StartShare(sessionName, false, []string{}, "pair", 0)
 		if err != nil {
 			color.Red("❌ Failed to start sharing: %v", err)
 		} else {
